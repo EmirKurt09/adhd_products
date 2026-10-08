@@ -191,14 +191,14 @@ def build_items(report: ScanReport, announcements: list[P.Announcement], schedul
                 ))
         # Ders materyalleri: içerik açılınca linki/ID'si değiştiği için kimlik = ders + bölüm + başlık
         used: dict[str, int] = {}
-        for content in detail.contents:
+        for order, content in enumerate(detail.contents):
             base = hashlib.sha1(f"{normalize(content.section)}|{normalize(content.title)}".encode()).hexdigest()[:12]
             used[base] = used.get(base, 0) + 1
             uid = f"{course_id}:{base}" + (f"-{used[base]}" if used[base] > 1 else "")
             items.append(Item(
                 kind="file", uid=uid, scope=scope, title=content.title, course=course_name, url=content.url,
                 extra={"section": content.section, "type": content.icon},
-                meta={"viewed": content.viewed},
+                meta={"viewed": content.viewed, "order": order},  # sitedeki sıra (menü için; olay üretmez)
             ))
 
     # Takvim: ders sayfasında görünmeyen ödevler (ders sayfası okunamadıysa vs.), canlı dersler, etkinlikler
