@@ -135,13 +135,47 @@ async def _setup_telegram(settings: Settings) -> int:
     return 0
 
 
-async def _test_notify(settings: Settings) -> int:
+async def _test_notify(settings: Settings, event: str) -> int:
+    settings.require("telegram")
+    if event == "odev":
+        return _enqueue_sample_assignment(settings)
     from telegram import Bot
 
-    settings.require("telegram")
     async with Bot(settings.telegram_token) as bot:
-        await bot.send_message(settings.telegram_owner_chat_id, "✅ e-Kampüs asistanı: test bildirimi")
+        await bot.send_message(settings.telegram_owner_chat_id, "e-Kampüs asistanı: test bildirimi")
     print("Gönderildi.")
+    return 0
+
+
+def _enqueue_sample_assignment(settings: Settings) -> int:
+    """Gerçek bir ödevin verisiyle "[TEST]" başlıklı yeni ödev olayını kuyruğa koyar.
+
+    Doğrudan Telegram'a değil outbox'a yazar: çalışan bot onu gerçek bir olay gibi işler (tercihler,
+    gece/sessiz modu, butonlar, LLM özeti). Butonlar gerçek ödeve bağlıdır, yani çalışır.
+    """
+    from datetime import datetime, timezone
+
+    from .detect import item_data
+    from .models import Event
+    from .store import Store
+
+    store = Store(settings.db_path)
+    try:
+        rows = store.items(("assignment",), order="due_at")
+        if not rows:
+            print("Veritabanında ödev yok; önce `check` ya da bot bir tarama yapmalı.")
+            return 1
+        row = max(rows, key=lambda r: len(r["body"] or ""))  # açıklaması en uzun olan: LLM özeti de denensin
+        data = {
+            "kind": "assignment", "uid": row["uid"], "scope": row["scope"], "title": f"[TEST] {row['title']}",
+            "course": row["course"], "due_at": row["due_at"], "url": row["url"], "body": row["body"],
+            "extra": row["extra"], "meta": row["meta"],
+        }
+        now = datetime.now(timezone.utc)
+        store.enqueue(Event("new", f"test:new:assignment:{now.timestamp():.0f}", data), now)
+    finally:
+        store.close()
+    print(f"Kuyruğa eklendi: [TEST] {row['title']}. Çalışan bot en geç ~15 sn içinde gönderir.")
     return 0
 
 
@@ -174,7 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check", help="tek tarama turu yap (bildirimler outbox'a yazılır)")
     check.add_argument("--dry-run", action="store_true", help="sadece oku ve göster, durumu değiştirme")
     sub.add_parser("setup-telegram", help="bota yazan chat'lerin kimliğini göster")
-    sub.add_parser("test-notify", help="Telegram'a deneme mesajı gönder")
+    test = sub.add_parser("test-notify", help="Telegram'a deneme bildirimi gönder")
+    test.add_argument("--olay", choices=["mesaj", "odev"], default="mesaj",
+                      help="mesaj: düz deneme mesajı; odev: [TEST] başlıklı yeni ödev bildirimi (bot üzerinden)")
     sub.add_parser("bot", help="Telegram botunu ve izlemeyi başlat (sürekli çalışır)")
     sub.add_parser("health", help="konteyner sağlık kontrolü")
     args = parser.parse_args(argv)
@@ -206,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "setup-telegram":
             return asyncio.run(_setup_telegram(settings))
         if args.cmd == "test-notify":
-            return asyncio.run(_test_notify(settings))
+            return asyncio.run(_test_notify(settings, args.olay))
     except ConfigError as e:
         print(f"Ayar hatası: {e}", file=sys.stderr)
         return 2
