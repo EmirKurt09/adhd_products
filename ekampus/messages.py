@@ -303,7 +303,7 @@ def help_text(llm_on: bool) -> str:
         "/odevler — açık ödevler",
         "/notlar — notların",
         "/duyurular — son duyurular",
-        "/dosyalar — son ders materyalleri",
+        "/dosyalar — ders materyalleri: ders seç, dosyayı al",
         "/dersler — derslerin ve ilerleme",
         "/takvim — 30 günlük takvim",
         "/yenile — siteyi şimdi kontrol et",
@@ -490,3 +490,75 @@ def llm_log_list_view(entries: list[dict], tz: ZoneInfo, now: datetime) -> Messa
                      f"   {escape(clip(e.get('question', ''), 60))} <i>[{escape(tools)}]</i>")
         buttons.append(Button(str(i + 1), data=f"llm:{i}"))
     return Message("\n".join(lines), [buttons[j:j + 5] for j in range(0, len(buttons), 5)])
+
+
+# ── Ders materyalleri menüsü (/dosyalar) ──────────────────────────────────────
+
+FORMAT_LABEL = {
+    "pdf": "PDF", "archive": "ZIP", "zip": "ZIP", "word": "Word", "powerpoint": "PowerPoint", "excel": "Excel",
+    "video": "Video", "play": "Video", "youtube": "Video", "link": "Bağlantı", "globe": "Bağlantı",
+    "image": "Görsel", "audio": "Ses", "code": "Kod", "alt": "Belge", "lines": "Belge",
+}
+MATERIALS_PAGE = 8
+
+
+def format_label(icon: str | None) -> str:
+    return FORMAT_LABEL.get((icon or "").lower(), "Dosya")
+
+
+def _material_order(row: dict) -> tuple:
+    order = row["meta"].get("order")
+    return (order is None, order if order is not None else 0, row.get("first_seen", ""), row["title"])
+
+
+def materials_courses_view(rows: list[dict]) -> Message:
+    """Materyali olan derslerin listesi; derse dokununca o dersin materyalleri açılır."""
+    courses: dict[str, dict] = {}
+    for r in rows:
+        course_id = r["scope"].split(":", 1)[-1]
+        c = courses.setdefault(course_id, {"name": r["course"], "total": 0, "unopened": 0})
+        c["total"] += 1
+        c["unopened"] += 0 if r["meta"].get("viewed") else 1
+    lines = ["<b>Ders materyalleri</b>"]
+    if not courses:
+        lines.append("\nHenüz materyal yok. Hoca yükleyince burada görünür ve sana haber veririm.")
+        return Message("\n".join(lines))
+    lines.append("Bir ders seç:\n")
+    ordered = sorted(courses.items(), key=lambda kv: kv[1]["name"])
+    for _, c in ordered:
+        unopened = f", {c['unopened']} açılmamış" if c["unopened"] else ""
+        lines.append(f"• {escape(c['name'])}: {c['total']} materyal{unopened}")
+    buttons = [[Button(f"{clip(c['name'], 34)} ({c['total']})", data=f"fc:{cid}:0")] for cid, c in ordered]
+    return Message("\n".join(lines), buttons)
+
+
+def materials_list_view(course_id: str, rows: list[dict], page: int) -> Message:
+    """Bir dersin materyalleri: bölümlere göre, sitedeki sırayla; her materyal bir buton."""
+    rows = sorted(rows, key=_material_order)
+    pages = max(1, -(-len(rows) // MATERIALS_PAGE))
+    page = min(max(page, 0), pages - 1)
+    start = page * MATERIALS_PAGE
+    shown = rows[start:start + MATERIALS_PAGE]
+    course = rows[0]["course"] if rows else ""
+    head = f"<b>{escape(course)}</b> · {len(rows)} materyal" + (f" · sayfa {page + 1}/{pages}" if pages > 1 else "")
+    lines = [head]
+    section = None
+    for n, r in enumerate(shown, start + 1):
+        current = r["extra"].get("section") or "Diğer"
+        if current != section:
+            section = current
+            lines.append(f"\n<b>{escape(section)}</b>")
+        state = "" if r["meta"].get("viewed") else " · açılmadı"
+        lines.append(f"{n}. {escape(r['title'])} · {format_label(r['extra'].get('type'))}{state}")
+    lines.append("\nDokunduğun materyali dosya olarak gönderirim. Bu, içeriği sitede “görüldü” yapar.")
+    buttons = [[Button(f"{n}. {format_label(r['extra'].get('type'))} · {clip(r['title'], 34)}", data=f"file:{r['uid']}")]
+               for n, r in enumerate(shown, start + 1)]
+    nav = []
+    if page > 0:
+        nav.append(Button("Önceki", data=f"fc:{course_id}:{page - 1}"))
+    if page < pages - 1:
+        nav.append(Button("Sonraki", data=f"fc:{course_id}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([Button("Derslere dön", data="fc:list")])
+    return Message("\n".join(lines), buttons)
