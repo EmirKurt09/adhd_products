@@ -84,6 +84,8 @@ Gece 01:00-07:00 arasında acil olmayan bildirimler sabaha bekletilir. Acil olan
 - Yeni ödevlere 3 maddelik özet ve tahmini süre.
 - Sabah özetine "bugünün planı" bölümü.
 
+**Sohbet hafızası (geçici çözüm):** Son 20 mesaj (`LLM_HISTORY_MESSAGES`) SQLite'ta tutulur ve her soruda modele tekrar gönderilir; böylece model bağlamı kaybedip boşa dolaşmaz. `/unut` geçmişi siler. Özetleme ya da uzun süreli hafıza gibi geliştirmeler sonraya bırakıldı.
+
 Her LLM çağrısı (soru, çağrılan araçlar, gördüğü veri, cevap) kaydedilir ve `/llmlog` ile görülebilir. LLM sadece yerel veritabanını okuyan araçlar kullanır ve günlük token bütçesi vardır (`LLM_DAILY_TOKEN_BUDGET`). LLM çökse de bildirimler etkilenmez.
 
 ## CLI
