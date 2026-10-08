@@ -1,0 +1,12 @@
+# Gizli bilgiler
+.env
+
+# Çalışma verisi (oturum çerezleri, veritabanı, keşif çıktıları)
+data/
+*.har
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

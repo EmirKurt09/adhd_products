@@ -1,0 +1,8 @@
+[project]
+name = "ekampus"
+version = "0.1.0"
+description = "e-Kampüs asistanı: ödev/duyuru takibi, Telegram bildirimleri ve LLM destekli sorgulama"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
