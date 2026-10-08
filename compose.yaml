@@ -13,6 +13,14 @@ services:
     init: true
     shm_size: "1gb"   # Chromium /dev/shm'e yazar; varsayılan 64 MB çökmeye yol açar
     restart: unless-stopped
+    # Paylaşılan sunucuda diğer servisleri (VPN vb.) korumak için sınırlar
+    mem_limit: 1536m
+    cpus: 1.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   ekampus-data:
