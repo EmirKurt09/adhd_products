@@ -1,0 +1,127 @@
+"""LLM araçları salt okunur ve doğru veri döndürmeli (ağ çağrısı yok)."""
+
+import asyncio
+import json
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from ekampus import messages as M
+from ekampus.detect import diff
+from ekampus.llm import TOOLS, Assistant
+from ekampus.models import Item, Scan
+from ekampus.store import Store
+
+
+def assistant(settings) -> Assistant:
+    store = Store(":memory:")
+    now = datetime.now(timezone.utc)
+    items = [
+        Item(kind="assignment", uid="1", scope="course:1", title="Açık ödev", course="Ağlar", due_at=now + timedelta(days=2),
+             body="Rapor yaz", meta={"submitted": False}),
+        Item(kind="assignment", uid="2", scope="course:1", title="Bitti", course="Ağlar", due_at=now + timedelta(days=1),
+             meta={"submitted": True, "grade": "90"}),
+        Item(kind="grade", uid="assignment:2", scope="course:1", title="Bitti", course="Ağlar", extra={"value": "90"}),
+        Item(kind="file", uid="1:x", scope="course:1", title="lecture 1", course="Ağlar", extra={"section": "Genel"}),
+    ]
+    sc = Scan(items=items, ok_scopes={("assignment", "course:1"), ("grade", "course:1"), ("file", "course:1")})
+    store.apply(sc, diff({}, set(), sc), now)
+    return Assistant(replace(settings, llm_api_key="test"), store)
+
+
+def test_tools_are_declared_for_every_handler(settings):
+    a = assistant(settings)
+    for tool in TOOLS:
+        name = tool["function"]["name"]
+        args = {"days": 7} if name == "agenda" else {"text": "ödev"} if name == "search" else \
+            {"kind": "assignment", "uid": "1"} if name == "get_item" else {}
+        assert "hata" not in str(a.run_tool(name, args))[:20], name
+
+
+def test_open_assignments_excludes_submitted(settings):
+    titles = [r["title"] for r in assistant(settings).run_tool("list_assignments", {"status": "open"})]
+    assert titles == ["Açık ödev"]
+
+
+def test_get_item_includes_body_and_agenda_has_both(settings):
+    a = assistant(settings)
+    assert a.run_tool("get_item", {"kind": "assignment", "uid": "1"})["metin"] == "Rapor yaz"
+    assert {r["uid"] for r in a.run_tool("agenda", {"days": 3})} == {"1", "2"}
+    assert a.run_tool("list_grades", {})[0]["not"] == "90"
+
+
+def test_unknown_tool(settings):
+    assert "hata" in assistant(settings).run_tool("delete_everything", {})
+
+
+# ── /llmlog kayıtları ─────────────────────────────────────────────────────────
+
+
+class _Call:
+    def __init__(self, call_id, name, args):
+        self.id = call_id
+        self.function = SimpleNamespace(name=name, arguments=json.dumps(args))
+
+    def model_dump(self):
+        return {"id": self.id, "type": "function", "function": {"name": self.function.name, "arguments": self.function.arguments}}
+
+
+def _response(content=None, tool_calls=None):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    return SimpleNamespace(usage=SimpleNamespace(total_tokens=100), choices=[SimpleNamespace(message=message)])
+
+
+def fake_client(*responses):
+    queue = list(responses)
+
+    async def create(**kwargs):
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+
+def test_answer_is_logged_with_tools_and_full_messages(settings):
+    a = assistant(settings)
+    a._model = "test-model"
+    a.client = fake_client(
+        _response(tool_calls=[_Call("c1", "list_assignments", {"status": "open"})]),
+        _response(content="Tek açık ödevin var: Açık ödev."),
+    )
+    assert asyncio.run(a.answer("açık ödevlerim ne?")) == "Tek açık ödevin var: Açık ödev."
+    entry = a.store.llm_log_at(0)
+    assert entry["kind"] == "sohbet" and entry["question"] == "açık ödevlerim ne?"
+    assert entry["tokens"] == 200 and entry["model"] == "test-model"
+    assert entry["steps"][0]["tool"] == "list_assignments" and entry["steps"][0]["count"] == 1
+    assert "Açık ödev" in entry["steps"][0]["preview"]
+    roles = [m["role"] for m in entry["messages"]]
+    assert roles[0] == "system" and "tool" in roles  # modele giden her şey kayıtta
+
+    view = M.llm_log_view(entry, 0, 1, settings.tz, M.datetime.now(M.ZoneInfo("UTC")))
+    assert "list_assignments(status=open)" in view.text and "1 kayıt" in view.text
+    assert all(len((b.data or "").encode()) <= 64 for row in view.buttons for b in row)
+
+
+def test_failed_call_is_logged_with_error(settings):
+    a = assistant(settings)
+    a._model = "test-model"
+    a.client = fake_client(RuntimeError("bağlantı koptu"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(a.answer("selam"))
+    assert "bağlantı koptu" in a.store.llm_log_at(0)["error"]
+
+
+def test_log_keeps_last_30(settings):
+    from datetime import datetime, timezone
+
+    a = assistant(settings)
+    for i in range(35):
+        a.store.llm_log_add({"kind": "sohbet", "question": str(i), "steps": []}, datetime.now(timezone.utc))
+    assert a.store.llm_log_count() == 30
+    assert a.store.llm_log_at(0)["question"] == "34"
+    view = M.llm_log_list_view(a.store.llm_log_recent(10), settings.tz, datetime.now(timezone.utc))
+    assert view.text.count("araç yok") == 10
