@@ -1,145 +1,163 @@
-# adhd_products: e-Kampüs asistanı
+# e-Kampüs Asistanı
 
-İstanbul Ticaret Üniversitesi e-kampüsünü izleyen bir Telegram botu. Yeni ödev, duyuru, not, ders materyali, canlı ders ve takvim etkinliklerini bildirir; teslimlerden önce hatırlatır; her sabah bir özet atar. LLM bağlanırsa (DeepSeek ya da Grok) normal cümleyle soru sormak da mümkün olur. e-Kampüs'e hiçbir şey yazmaz.
+İstanbul Ticaret Üniversitesi e-Kampüs sistemi (Toltek TCampus) için Telegram üzerinden çalışan, ADHD dostu kişisel öğrenci asistanı.
 
-## Neyi nasıl izler
+e-Kampüs yeni bir ödev, duyuru ya da not girildiğinde öğrenciye haber vermiyor; bir şeyin değişip değişmediğini anlamak için siteye sürekli girip bakmak gerekiyor. Dikkat dağınıklığı yaşayan biri için bu, teslim tarihlerinin kaçması demek. Bu proje siteyi düzenli aralıklarla kontrol ediyor ve önemli olan her şeyi Telegram'a yazıyor. Teslimlerden önce hatırlatıyor, her sabah günün özetini çıkarıyor. Normal cümleyle sorulan sorulara da sitedeki gerçek veriye dayanarak cevap veriyor.
 
-| Ne | Nereden | Bildirim |
+## Özellikler
+
+- **Takip:** ödevler ve teslim durumu, notlar, duyurular, ders materyalleri, canlı dersler ve sınavlar.
+- **Bildirim:** yeni ya da değişen her şey Telegram'a anında gelir; ödev ayrıntısı ve dosyalar mesajdaki butonlarla açılır.
+- **Hatırlatma:** teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce; her sabah günün özeti.
+- **Uyarı yöneticisi:** bildirim türlerini açıp kapatma, gece ve sessiz mod; siteye erişilemediğinde açıklamalı uyarı.
+- **LLM asistanı:** Grok ya da DeepSeek ile serbest soru, ödev özetleri ve günlük plan; `/llmlog` ile modelin hangi veriye baktığı görülebilir.
+- **Güvenilirlik:** hiçbir bildirim kaybolmaz ya da iki kez gelmez.
+
+## Nasıl çalışır
+
+```mermaid
+flowchart LR
+    S[e-Kampüs] -->|Playwright, salt okunur| T[Tarama]
+    T --> P[Ayrıştırma]
+    P --> D[Fark algılama]
+    D --> DB[(SQLite<br/>kayıtlar ve bildirim kuyruğu)]
+    DB --> B[Telegram botu]
+    DB --> L[LLM araçları]
+    L <--> M[Grok / DeepSeek]
+    B <--> U[Kullanıcı]
+```
+
+Bot belirli aralıklarla e-Kampüs'e girer ve ders sayfalarını, takvimi ve duyuruları okur. Okuduğu her şeyi bir önceki durumla karşılaştırır; yeni ya da değişen her kayıt bir bildirime dönüşür ve Telegram'a iletilene kadar kuyrukta bekler. Komutlar ve LLM aynı veritabanını kullanır.
+
+Yanlış alarm vermemek için algılama temkinli çalışır:
+- İlk kurulumda var olan kayıtlar bildirilmez.
+- Siteden geçici olarak kaybolan bir kayıt "silindi" sayılmaz.
+- Sitenin yapısı değişirse "yeni bir şey yok" denmez, uyarı verilir.
+
+## Teknolojiler
+
+| Alan | Kullanılan |
+|---|---|
+| Dil | Python 3.12+ |
+| Site erişimi | Playwright (Chromium), BeautifulSoup |
+| Bot | python-telegram-bot 22 (asyncio, JobQueue) |
+| Veri | SQLite |
+| LLM | OpenAI uyumlu API: xAI Grok, DeepSeek |
+| Çalıştırma | Docker, Docker Compose, Windows Görev Zamanlayıcı |
+| Test | pytest |
+
+## Proje yapısı
+
+```
+ekampus/
+  config.py      ayarlar (ortam değişkenleri)
+  browser.py     Playwright oturumu ve login koruması
+  scan.py        tarama turu: kaynakları okuyup kayıtları kurar
+  parse.py       sayfa ayrıştırıcıları
+  detect.py      önceki durumla karşılaştırma, olay üretimi
+  reminders.py   teslim hatırlatma ve canlı ders kuralları
+  store.py       SQLite: kayıtlar, bildirim kuyruğu, sohbet geçmişi, LLM kayıtları
+  engine.py      tarama zamanlaması, sağlık uyarıları, bildirim gönderimi
+  bot.py         Telegram komutları, butonlar, erişim kontrolü
+  llm.py         LLM asistanı ve salt okunur araçları
+  messages.py    mesaj biçimleri
+  prefs.py       bildirim tercihleri
+  explore.py     sitenin salt okunur keşfi (geliştirme aracı)
+  doctor.py      ortam kontrolü
+scripts/         sunucuya dağıtım, Windows'ta otomatik başlatma
+tests/           birim testleri, sitenin yapısını taklit eden fixture'lar
+docs/            site haritası
+```
+
+## Kurulum
+
+**Gereksinimler:**
+- Python 3.12 ya da üstü
+- e-Kampüs (ÖBS) hesabı
+- Telegram bot token'ı (@BotFather'dan)
+- İsteğe bağlı: xAI ya da DeepSeek API anahtarı
+- Sunucuda çalıştırmak için: Docker
+
+### Yerel
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements-dev.txt      # Linux/macOS: .venv/bin/python
+.venv/Scripts/python -m playwright install chromium
+cp .env.example .env                                             # sonra doldur
+.venv/Scripts/python -m ekampus doctor
+.venv/Scripts/python -m ekampus bot
+```
+
+Telegram'a bağlamak için `TELEGRAM_OWNER_CHAT_ID`'yi boş bırakıp botu başlat ve bota `/start` yaz. Bot sana chat ID'ni söyler; onu `.env`'e yazıp botu yeniden başlat. Bot bundan sonra yalnızca bu hesapla konuşur.
+
+Windows'ta oturum açılınca arka planda başlaması için:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows-autostart.ps1     # kaldırmak için: -Remove
+```
+
+### Sunucu (Docker)
+
+```bash
+DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh --env   # ilk kurulum
+DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh         # güncelleme
+```
+
+Betik kodu sunucuya gönderip orada derler ve botu yeniden başlatır; `--env` ile yapılandırma dosyası da SSH üzerinden aktarılır. Sunucu yeniden başlarsa bot kendiliğinden kalkar.
+
+### Yapılandırma
+
+Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
+
+| Değişken | Açıklama | Varsayılan |
 |---|---|---|
-| Ödev | Ders sayfası (varlık, teslim durumu) + takvim JSON'u (tarih, açıklama) | yeni · tarih değişti/eklendi · içerik güncellendi · 24 sa ve 3 sa kala (teslim edilmediyse) |
-| Not | Ders sayfasındaki "Sonuç" rozeti | girildi · değişti |
-| Duyuru | Duyurular sayfası | yeni · güncellendi |
-| Ders materyali | Ders sayfasındaki içerik listesi | yeni (📥 ile dosyayı Telegram'a ister) |
-| Canlı ders, sınav, etkinlik | Takvim JSON'u | yeni · saat değişti · canlı dersten 15 dk önce |
+| `EKAMPUS_USERNAME`, `EKAMPUS_PASSWORD` | ÖBS kullanıcı adı ve şifresi | |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID` | Bot token'ı ve botun konuşacağı tek hesap | |
+| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | `xai` ya da `deepseek`, API anahtarı, model | `deepseek`, boş, otomatik |
+| `LLM_DAILY_TOKEN_BUDGET` | Günlük token sınırı | 200000 |
+| `LLM_HISTORY_MESSAGES` | Her soruda modele tekrar gönderilen son mesaj sayısı | 20 |
+| `POLL_INTERVAL_MIN`, `NIGHT_POLL_INTERVAL_MIN` | Gündüz ve gece kontrol aralığı (dakika) | 15, 60 |
+| `NIGHT_HOURS` | Acil olmayan bildirimlerin sabaha bekletildiği saatler | 01:00-07:00 |
+| `DAILY_DIGEST_TIME` | Sabah özetinin saati | 08:00 |
+| `REMINDER_HOURS` | Teslimden kaç saat önce hatırlatılacağı | 24,3 |
 
-Algılama kuralları (`ekampus/detect.py`):
-- İlk tarama sessizdir; sadece bir "İzleme başladı" özeti gelir.
-- Kaybolan bir kayıt hiçbir zaman "silindi" bildirimi üretmez.
-- Hata veren ya da şüpheli görünen turlarda hiçbir şey eksik sayılmaz.
-- Bildirimler outbox üzerinden gider: hiçbiri kaybolmaz, hiçbiri iki kez gelmez.
+## Kullanım
 
-Sistem sağlığı da izlenir:
-- **Siteye girilemezse** (varsayılan olarak 2 kontrol üst üste) uyarı gelir. Uyarı hatanın türünü söyler: site yanıt vermiyor mu, sunucu hata mı veriyor, bakım sayfası mı var, internet mi yok. Son başarılı kontrolün zamanı da yazar.
-- Site düzelince ne kadar süre kapalı kaldığı bildirilir.
-- Gece yaşanıp sabaha kadar düzelen kesintiler hiç rahatsız etmez.
-- Giriş reddedilirse ya da site yapısı değişirse de uyarı gelir.
-
-## Kurulum (Windows)
-
-```powershell
-py -3.13 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements-dev.txt
-.venv\Scripts\python -m playwright install chromium   # daha önce kurulmadıysa
-copy .env.example .env                                # sonra doldur
-.venv\Scripts\python -m ekampus doctor
-```
-
-Telegram kurulumu:
-1. **@BotFather** → `/newbot` ile bir bot aç ve token'ı `.env` içinde `TELEGRAM_BOT_TOKEN` alanına yaz.
-2. `.venv\Scripts\python -m ekampus bot` ile botu başlat ve bota `/start` yaz. Bot sana chat id'ni söyler.
-3. Chat id'yi `TELEGRAM_OWNER_CHAT_ID` alanına yaz ve botu yeniden başlat.
-
-Bot sadece bu chat id ile konuşur.
-
-**Sürekli çalışsın** (oturum açılınca penceresiz başlar, çökerse yeniden başlar):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\windows-autostart.ps1           # kur
-powershell -ExecutionPolicy Bypass -File scripts\windows-autostart.ps1 -Remove   # kaldır
-```
-
-## Telegram komutları
-
-| Komut | Ne yapar |
+| Komut | Açıklama |
 |---|---|
-| `/bugun` | Bugün ve yarın neler var |
-| `/hafta` | Önümüzdeki 7 gün |
-| `/takvim` | Önümüzdeki 30 gün |
-| `/odevler` | Açık ödevler, aciliyet sırasıyla; ayrıntı butonları |
-| `/notlar` | Notlar |
-| `/duyurular` | Son duyurular |
-| `/dosyalar [ders]` | Son materyaller; 📥 dosyayı Telegram'a gönderir |
-| `/dersler` | Dersler, ilerleme, içerik ve ödev sayıları |
-| `/yenile` | Siteyi hemen kontrol et |
-| `/bildirimler` | **Uyarı yöneticisi:** sistem durumu (site erişimi, giriş, okunamayan bölümler), bildirim türlerini aç/kapa, erişim uyarısının eşiği (1/2/3/5 hata), gece modu, hızlı sessiz, son bildirimler |
-| `/durum` | Son kontrol, sonraki kontrol, login kilidi, bekleyen bildirimler, LLM bütçesi |
-| `/sessiz 2s` | Acil olmayanları 2 saat beklet (`30dk`, `1g`, `kapat`) |
-| `/girisdene` | Login kilidini kaldır ve tekrar dene |
-| `/unut` | LLM sohbet geçmişini sil |
-| `/llmlog` | LLM son cevapta hangi araçla hangi veriye baktı; `/llmlog 3`, `/llmlog liste`, tam veri JSON olarak |
+| `/bugun`, `/hafta`, `/takvim` | Bugün ve yarın, önümüzdeki 7 gün, önümüzdeki 30 gün |
+| `/odevler` | Açık ödevler, teslim tarihine göre sıralı |
+| `/notlar`, `/duyurular`, `/dersler` | Notlar, son duyurular, dersler ve ilerleme durumu |
+| `/dosyalar [ders]` | Son ders materyalleri; istenen dosya Telegram'a gönderilir |
+| `/bildirimler` | Uyarı yöneticisi: sistem durumu, bildirim türleri, gece modu, sessiz mod, geçmiş |
+| `/sessiz 2s` | Acil olmayan bildirimleri belirli bir süre beklet (`30dk`, `1g`, `kapat`) |
+| `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş ve kuyruk durumu |
+| `/llmlog`, `/unut` | LLM'in son cevapta baktığı veriler; sohbet geçmişini silme |
+| `/girisdene` | Reddedilen bir girişten sonra login kilidini kaldırıp tekrar dene |
 
-Bildirimlerin altındaki butonlar:
-- **📄 Detay:** açıklamayı ve ekleri gösterir.
-- **✅ Teslim ettim:** o ödevin hatırlatmalarını keser.
-- **📥 Gönder:** materyali ya da eki Telegram'a gönderir.
+Komutların dışında bota normal cümleyle de yazılabilir. LLM bağlıysa soruyu o cevaplar; bağlı değilse "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştırır.
 
-📥 bir materyali açtığı için o içerik sitede "görüldü" sayılır.
+## Güvenlik ve gizlilik
 
-Gece 01:00-07:00 arasında acil olmayan bildirimler sabaha bekletilir. Acil olanlar her zaman gelir: 3 saatten az kalan teslimler, canlı ders ve sistem uyarıları.
-
-## LLM (isteğe bağlı)
-
-`.env` içinde `LLM_PROVIDER` alanına `deepseek` ya da `xai`, `LLM_API_KEY` alanına da anahtarını yaz. `LLM_MODEL` boş bırakılırsa model otomatik seçilir; `doctor` mevcut modelleri listeler. LLM bağlanınca şunlar açılır:
-- Serbest soru: "bu hafta neye odaklanayım?"
-- Yeni ödevlere 3 maddelik özet ve tahmini süre.
-- Sabah özetine "bugünün planı" bölümü.
-
-**Sohbet hafızası (geçici çözüm):** Son 20 mesaj (`LLM_HISTORY_MESSAGES`) SQLite'ta tutulur ve her soruda modele tekrar gönderilir; böylece model bağlamı kaybedip boşa dolaşmaz. `/unut` geçmişi siler. Özetleme ya da uzun süreli hafıza gibi geliştirmeler sonraya bırakıldı.
-
-Her LLM çağrısı (soru, çağrılan araçlar, gördüğü veri, cevap) kaydedilir ve `/llmlog` ile görülebilir. LLM sadece yerel veritabanını okuyan araçlar kullanır ve günlük token bütçesi vardır (`LLM_DAILY_TOKEN_BUDGET`). LLM çökse de bildirimler etkilenmez.
-
-## CLI
-
-| Komut | Ne yapar |
-|---|---|
-| `doctor` | Python, Playwright, tarayıcı, site, login formu, captcha, `.env`, Telegram ve LLM kontrolü; hiçbir şeyi değiştirmez |
-| `bot` | Botu ve izlemeyi başlatır |
-| `check [--dry-run]` | Tek tarama turu yapar; `--dry-run` sadece gösterir |
-| `login [--headed] [--force]` | Giriş yapar ve oturumu kaydeder. `--headed` captcha için görünür tarayıcıda giriş yaptırır, `--force` login kilidini sıfırlar |
-| `explore [--max-pages N]` | Siteyi sadece okuyarak keşfeder (HTML, ekran görüntüsü, JSON, HAR) |
-| `setup-telegram` | Bota yazan chat'lerin id'lerini listeler |
-| `test-notify [--olay odev]` | Deneme mesajı gönderir; `--olay odev` gerçek bir ödevin verisiyle "[TEST]" başlıklı yeni ödev bildirimini botun normal hattından geçirir (butonlar ve LLM özeti dahil) |
-| `health` | Konteyner sağlık kontrolü (heartbeat) |
-
-Veriler (`state.db`, `session.json`, loglar) Windows'ta `%LOCALAPPDATA%\ekampus`, Docker'da `/data` altında durur ve oturum çerezi içerdiği için ne repoya ne OneDrive'a girer.
-
-**Login güvenliği:** Sunucu şifreyi bir kez reddederse aynı bilgilerle bir daha denenmez; hesap kilitlenmez ve captcha tetiklenmez. İki deneme arasında en az 10 dakika beklenir. Kilit, şifre değişince, `/girisdene` ile ya da `login --force` ile kalkar.
-
-## Docker / bulut
-
-```bash
-docker compose build
-docker compose run --rm ekampus python -m ekampus doctor
-docker compose up -d
-docker compose logs -f
-```
-
-Compose aynı `.env` dosyasını okur ve verileri `ekampus-data` volume'ünde tutar. İmaj amd64 ve arm64'te çalışır (Oracle free tier ARM dahil).
-
-### Sunucuya dağıtım
-
-```bash
-DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh --env        # ilk kurulum: .env de gider
-DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh              # sonraki güncellemeler
-```
-
-- Kod GitHub'dan değil yerel repodan gider, yani sadece commit'lenmiş hali (HEAD) gönderilir; sunucuda git erişimi gerekmez.
-- `.env` SSH tünelinden doğrudan sunucudaki `/opt/ekampus/.env` dosyasına yazılır. Dosyayı sadece root okuyabilir ve satır sonlarındaki CRLF temizlenir.
-- `--no-start` verilirse kod gönderilir ve derlenir ama bot başlatılmaz.
-- Konteyner paylaşılan sunucudaki diğer servisleri etkilemesin diye sınırlıdır: en fazla 1,5 GB bellek, 1,5 CPU ve 30 MB log.
-
-⚠️ Aynı anda tek bot çalışmalı: buluta geçince PC'deki görevi kaldır (`windows-autostart.ps1 -Remove`). İki bot birden çalışırsa Telegram çakışma hatası verir.
-
-Sunucuda captcha çıkarsa PC'de `login --headed` ile giriş yap, sonra oturumu konteynere kopyala:
-
-```bash
-docker compose cp "$LOCALAPPDATA/ekampus/session.json" ekampus:/data/session.json
-```
+- **Salt okunur:** Bot e-Kampüs'e hiçbir şey yazmaz; ödev teslim etmez, form göndermez.
+- **Hesap güvenliği:** Şifre reddedilirse giriş tekrar denenmez, böylece hesap kilitlenmez.
+- **Tek kullanıcı:** Bot yalnızca sahibine cevap verir; başkalarının mesajlarını yanıtsız bırakır ve sahibine bildirir.
+- **Gizli bilgiler:** Şifre, token ve API anahtarı sadece `.env` dosyasında durur, repoya girmez.
+- **LLM:** Model yalnızca ödev, not ve takvim gibi ders verilerini görür; kimlik bilgilerine erişimi yoktur.
 
 ## Geliştirme
 
-```powershell
-.venv\Scripts\python -m pytest
+```bash
+.venv/Scripts/python -m pytest                      # testler
+.venv/Scripts/python -m ekampus doctor              # ortam ve bağlantı kontrolü
+.venv/Scripts/python -m ekampus check --dry-run     # tek tarama, durumu değiştirmeden
+.venv/Scripts/python -m ekampus test-notify --olay odev   # örnek bildirimi botun hattından geçir
 ```
 
-Site yapısı ve tuzaklar: [docs/site-map.md](docs/site-map.md)
+Sitenin yapısı, kullanılan adresler ve dikkat edilmesi gereken noktalar [docs/site-map.md](docs/site-map.md) dosyasında.
+
+## Yol haritası
+
+- LLM için uzun süreli hafıza
+- Duyuru, sanal sınıf ve sınav kayıtlarının gerçek veriyle doğrulanması
