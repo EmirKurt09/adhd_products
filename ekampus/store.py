@@ -282,16 +282,19 @@ class Store:
         return {"pending": row["pending"] or 0, "failing": row["failing"] or 0, "last_sent": row["last_sent"]}
 
     # ── LLM sohbet geçmişi ────────────────────────────────────────────────
-    def chat_add(self, role: str, content: str, now: datetime) -> None:
+    # Geçici çözüm: son N mesajı tutup her soruda tekrar gönderiyoruz ki model bağlamı kaybedip
+    # boşa dolaşmasın. Özetleme / kalıcı hafıza gibi geliştirmeler sonraya bırakıldı.
+    def chat_add(self, role: str, content: str, now: datetime, keep: int = 20) -> None:
         with self.db:
             self.db.execute("INSERT INTO chat (role, content, created_at) VALUES (?, ?, ?)", (role, content, _ts(now)))
-            self.db.execute("DELETE FROM chat WHERE id NOT IN (SELECT id FROM chat ORDER BY id DESC LIMIT 40)")
+            self.db.execute("DELETE FROM chat WHERE id NOT IN (SELECT id FROM chat ORDER BY id DESC LIMIT ?)", (keep,))
 
-    def chat_recent(self, limit: int, since: datetime) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT role, content FROM chat WHERE created_at >= ? ORDER BY id DESC LIMIT ?", (_ts(since), limit)
-        )
-        return [dict(r) for r in reversed(list(rows))]
+    def chat_recent(self, limit: int) -> list[dict]:
+        rows = self.db.execute("SELECT role, content FROM chat ORDER BY id DESC LIMIT ?", (limit,))
+        history = [dict(r) for r in reversed(list(rows))]
+        while history and history[0]["role"] != "user":  # pencere bir cevabın ortasından başlamasın
+            history.pop(0)
+        return history
 
     def chat_clear(self) -> None:
         with self.db:

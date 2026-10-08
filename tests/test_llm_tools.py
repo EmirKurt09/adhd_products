@@ -125,3 +125,49 @@ def test_log_keeps_last_30(settings):
     assert a.store.llm_log_at(0)["question"] == "34"
     view = M.llm_log_list_view(a.store.llm_log_recent(10), settings.tz, datetime.now(timezone.utc))
     assert view.text.count("araç yok") == 10
+
+
+# ── Sohbet hafızası (son N mesaj) ─────────────────────────────────────────────
+
+def capturing_client(answer: str):
+    sent: list[list[dict]] = []
+
+    async def create(**kwargs):
+        sent.append([dict(m) for m in kwargs["messages"]])
+        return _response(content=answer)
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), sent
+
+
+def test_last_20_messages_are_resent(settings):
+    a = assistant(settings)
+    a._model = "test-model"
+    now = datetime.now(timezone.utc)
+    for i in range(15):  # 30 mesaj; sadece son 20'si kalmalı
+        a.store.chat_add("user", f"soru {i}", now)
+        a.store.chat_add("assistant", f"cevap {i}", now)
+    a.client, sent = capturing_client("tamam")
+    asyncio.run(a.answer("yeni soru"))
+    history = sent[0][1:-1]  # sistem talimatı ve yeni soru arası
+    assert len(history) == 20
+    assert history[0] == {"role": "user", "content": "soru 5"} and history[-1]["content"] == "cevap 14"
+    assert sent[0][-1] == {"role": "user", "content": "yeni soru"}
+    assert len(a.store.chat_recent(100)) == 20  # yeni soru-cevap eklendi, en eski ikisi düştü
+
+
+def test_window_never_starts_mid_answer(settings):
+    a = assistant(settings)
+    now = datetime.now(timezone.utc)
+    a.store.chat_add("assistant", "yarım kalmış cevap", now)
+    a.store.chat_add("user", "soru", now)
+    a.store.chat_add("assistant", "cevap", now)
+    assert [m["role"] for m in a.store.chat_recent(20)] == ["user", "assistant"]
+
+
+def test_history_can_be_disabled(settings):
+    a = assistant(replace(settings, llm_history_messages=0))
+    a._model = "test-model"
+    a.client, sent = capturing_client("tamam")
+    asyncio.run(a.answer("birinci"))
+    asyncio.run(a.answer("ikinci"))
+    assert [m["role"] for m in sent[1]] == ["system", "user"]
