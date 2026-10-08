@@ -129,7 +129,7 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `/bugun`, `/hafta`, `/takvim` | Bugün ve yarın, önümüzdeki 7 gün, önümüzdeki 30 gün |
 | `/odevler` | Açık ödevler, teslim tarihine göre sıralı |
 | `/notlar`, `/duyurular`, `/dersler` | Notlar, son duyurular, dersler ve ilerleme durumu |
-| `/dosyalar [ders]` | Son ders materyalleri; istenen dosya Telegram'a gönderilir |
+| `/dosyalar [ders]` | Ders seçilir, o dersin materyalleri bölümlere göre biçimleriyle (PDF, ZIP, PowerPoint…) listelenir; dokunulan materyal dosya olarak gönderilir |
 | `/bildirimler` | Uyarı yöneticisi: sistem durumu, bildirim türleri, gece modu, sessiz mod, geçmiş |
 | `/sessiz 2s` | Acil olmayan bildirimleri belirli bir süre beklet (`30dk`, `1g`, `kapat`) |
 | `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş ve kuyruk durumu |
