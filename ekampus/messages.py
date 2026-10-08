@@ -1,0 +1,492 @@
+"""Telegram mesaj metinleri (HTML parse mode). Saf fonksiyonlar: veri → (metin, butonlar).
+
+Biçim ilkesi: süs emojisi yok. Durum ve aciliyet yazıyla ve kalınlıkla anlatılır.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from html import escape
+from zoneinfo import ZoneInfo
+
+GUNLER = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
+GUNLER_UZUN = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+AYLAR = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+AYLAR_UZUN = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
+              "Kasım", "Aralık"]
+
+KIND_LABEL = {
+    "assignment": "ödev", "announcement": "duyuru", "grade": "not", "live": "canlı ders",
+    "file": "ders materyali", "event": "etkinlik",
+}
+
+
+@dataclass
+class Button:
+    text: str
+    data: str | None = None   # callback verisi
+    url: str | None = None
+
+
+@dataclass
+class Message:
+    text: str
+    buttons: list[list[Button]] = field(default_factory=list)
+    silent: bool = False      # bildirim sesi olmadan
+
+
+def parse_dt(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def fmt_dt(dt: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> str:
+    if dt is None:
+        return "tarih yok"
+    local = dt.astimezone(tz)
+    today = (now or datetime.now(tz)).astimezone(tz).date()
+    clock = local.strftime("%H:%M")
+    if local.date() == today:
+        return f"bugün {clock}"
+    if local.date() == today + timedelta(days=1):
+        return f"yarın {clock}"
+    if local.date() == today - timedelta(days=1):
+        return f"dün {clock}"
+    return f"{local.day} {AYLAR[local.month - 1]} {GUNLER[local.weekday()]} {clock}"
+
+
+def remaining(dt: datetime | None, now: datetime) -> str:
+    if dt is None:
+        return ""
+    delta = dt - now
+    if delta.total_seconds() <= 0:
+        return "süresi geçti"
+    minutes = int(delta.total_seconds() // 60)
+    days, minutes = divmod(minutes, 60 * 24)
+    hours, minutes = divmod(minutes, 60)
+    if days >= 2:
+        return f"{days} gün kaldı"
+    if days == 1:
+        return f"1 gün {hours} sa kaldı"
+    if hours >= 1:
+        return f"{hours} sa {minutes} dk kaldı"
+    return f"{minutes} dk kaldı"
+
+
+def left(dt: datetime | None, now: datetime) -> str:
+    """Kalan süre; 24 saatten azsa kalın (göz ilk ona gitsin)."""
+    text = remaining(dt, now)
+    if dt is not None and 0 < (dt - now).total_seconds() <= 24 * 3600:
+        return f"<b>{text}</b>"
+    return text
+
+
+def clip(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _course(data: dict) -> str:
+    return f"\n<i>{escape(data['course'])}</i>" if data.get("course") else ""
+
+
+def _link_row(data: dict, label: str = "Sitede aç") -> list[Button]:
+    return [Button(label, url=data["url"])] if data.get("url", "").startswith("https://") else []
+
+
+def assignment_buttons(data: dict) -> list[list[Button]]:
+    rows = [[Button("Detay", data=f"det:{data['uid']}"), Button("Teslim ettim", data=f"done:{data['uid']}")]]
+    link = _link_row(data)
+    if link:
+        rows.append(link)
+    return rows
+
+
+# ── Olay → mesaj ──────────────────────────────────────────────────────────────
+
+def render_event(event_type: str, data: dict, tz: ZoneInfo, now: datetime) -> Message:
+    kind = data.get("kind", "")
+    title = escape(data.get("title", ""))
+    due = parse_dt(data.get("due_at"))
+
+    if event_type == "new" and kind == "assignment":
+        lines = [f"<b>Yeni ödev:</b> {title}{_course(data)}"]
+        lines.append(f"Teslim: <b>{fmt_dt(due, tz, now)}</b>" + (f" · {left(due, now)}" if due else ""))
+        start = parse_dt((data.get("extra") or {}).get("start"))
+        if start and start > now:
+            lines.append(f"Başlangıç: {fmt_dt(start, tz, now)}")
+        if data.get("body"):
+            lines.append(f"\n{escape(clip(data['body'], 500))}")
+        return Message("\n".join(lines), assignment_buttons(data))
+
+    if event_type == "new" and kind == "announcement":
+        lines = [f"<b>Yeni duyuru:</b> {title}{_course(data)}"]
+        if data.get("body"):
+            lines.append(f"\n{escape(clip(data['body'], 1200))}")
+        return Message("\n".join(lines), [_link_row(data)] if _link_row(data) else [])
+
+    if event_type == "new" and kind == "grade":
+        value = escape((data.get("extra") or {}).get("value", "?"))
+        return Message(f"<b>Not girildi:</b> {title} → <b>{value}</b>{_course(data)}",
+                       [_link_row(data)] if _link_row(data) else [])
+
+    if event_type == "new" and kind == "file":
+        section = (data.get("extra") or {}).get("section")
+        text = f"<b>Yeni ders materyali:</b> {title}{_course(data)}" + (f"\nBölüm: {escape(section)}" if section else "")
+        return Message(text, [[Button("Gönder", data=f"file:{data['uid']}")]], silent=True)
+
+    if event_type == "new" and kind == "live":
+        return Message(
+            f"<b>Yeni canlı ders:</b> {title}{_course(data)}\nZaman: {fmt_dt(due, tz, now)}",
+            [_link_row(data, "Ders sayfası")] if _link_row(data) else [],
+        )
+
+    if event_type == "new":
+        type_name = (data.get("extra") or {}).get("type") or KIND_LABEL.get(kind, kind)
+        return Message(
+            f"<b>Yeni {escape(type_name.lower())}:</b> {title}{_course(data)}\nZaman: {fmt_dt(due, tz, now)}",
+            [_link_row(data)] if _link_row(data) else [],
+        )
+
+    if event_type == "due_changed":
+        old = parse_dt(data.get("old_due_at"))
+        label = KIND_LABEL.get(kind, kind)
+        if old is None:
+            head = f"<b>Teslim tarihi eklendi:</b> {title}"
+        else:
+            head = f"<b>{label.capitalize()} tarihi değişti:</b> {title}"
+        lines = [head + _course(data)]
+        if old is not None:
+            lines.append(f"Eski: <s>{fmt_dt(old, tz, now)}</s>")
+        lines.append(f"Yeni: <b>{fmt_dt(due, tz, now)}</b> · {left(due, now)}")
+        if data.get("content_changed"):
+            lines.append("Açıklama da güncellendi.")
+        buttons = assignment_buttons(data) if kind == "assignment" else ([_link_row(data)] if _link_row(data) else [])
+        return Message("\n".join(lines), buttons)
+
+    if event_type == "changed":
+        if kind == "grade":
+            value = escape((data.get("extra") or {}).get("value", "?"))
+            return Message(f"<b>Not güncellendi:</b> {title} → <b>{value}</b>{_course(data)}")
+        label = KIND_LABEL.get(kind, kind)
+        lines = [f"<b>{label.capitalize()} güncellendi:</b> {title}{_course(data)}"]
+        if data.get("body"):
+            lines.append(f"\n{escape(clip(data['body'], 600))}")
+        buttons = assignment_buttons(data) if kind == "assignment" else []
+        return Message("\n".join(lines), buttons)
+
+    if event_type == "reminder":
+        hours = data.get("hours")
+        return Message(
+            f"<b>Hatırlatma, {hours} saat kaldı:</b> {title}{_course(data)}\n"
+            f"Teslim: <b>{fmt_dt(due, tz, now)}</b> · {left(due, now)}\n"
+            "Teslim ettiysen butona bas, bu ödev için hatırlatmayı keserim.",
+            assignment_buttons(data),
+        )
+
+    if event_type == "live_soon":
+        return Message(
+            f"<b>Canlı ders başlıyor:</b> {title}{_course(data)}\nZaman: {fmt_dt(due, tz, now)}",
+            [_link_row(data, "Derse git")] if _link_row(data) else [],
+        )
+
+    if event_type == "scope_added":
+        items = data.get("items", [])
+        names = "\n".join(f"• {escape(i['title'])}" for i in items[:10])
+        more = f"\n… ve {len(items) - 10} tane daha" if len(items) > 10 else ""
+        label = KIND_LABEL.get(data.get("kind", ""), "kayıt")
+        return Message(
+            f"<b>İzlemeye alındı:</b> {escape(data.get('course') or data.get('scope', ''))}\n"
+            f"Mevcut {len(items)} {label}:\n{names}{more}",
+            silent=True,
+        )
+
+    if event_type == "baseline":
+        return render_baseline(data, tz, now)
+
+    if event_type == "alert":
+        return Message(data.get("text", "Uyarı"))
+
+    return Message(f"{escape(event_type)}: {title}")
+
+
+def render_baseline(data: dict, tz: ZoneInfo, now: datetime) -> Message:
+    counts = data.get("counts", {})
+    parts = [f"{n} {KIND_LABEL.get(k, k)}" for k, n in sorted(counts.items())]
+    lines = ["<b>İzleme başladı.</b>", "Şu an sitede: " + (", ".join(parts) or "kayıt yok") + "."]
+    lines.append("Bundan sonra gelen her yeni şeyi buraya yazacağım.")
+    open_items = sorted(data.get("open_assignments", []), key=lambda d: d.get("due_at") or "9999")
+    if open_items:
+        lines.append("\n<b>Açık ödevlerin:</b>")
+        for d in open_items[:10]:
+            due = parse_dt(d.get("due_at"))
+            lines.append(f"• {escape(d['title'])} · {fmt_dt(due, tz, now)}" + (f" · {left(due, now)}" if due else ""))
+    if data.get("failed_scopes"):
+        lines.append("\nBazı bölümler okunamadı, bir sonraki turda tekrar denenecek.")
+    return Message("\n".join(lines))
+
+
+def render_group(event_type: str, kind: str, payloads: list[dict], tz: ZoneInfo, now: datetime) -> Message:
+    """Aynı türden çok sayıda olay tek mesajda (ör. dönem başında 12 yeni materyal)."""
+    label = KIND_LABEL.get(kind, kind)
+    head = {"new": f"<b>{len(payloads)} yeni {label}</b>", "changed": f"<b>{len(payloads)} {label} güncellendi</b>",
+            "due_changed": f"<b>{len(payloads)} {label} tarihi değişti</b>"}.get(event_type, f"{len(payloads)} olay")
+    lines = [head]
+    for d in payloads[:25]:
+        due = parse_dt(d.get("due_at"))
+        suffix = f" · {fmt_dt(due, tz, now)}" if due else ""
+        course = f" <i>({escape(d['course'])})</i>" if d.get("course") else ""
+        lines.append(f"• {escape(d.get('title', ''))}{course}{suffix}")
+    if len(payloads) > 25:
+        lines.append(f"… ve {len(payloads) - 25} tane daha")
+    return Message("\n".join(lines))
+
+
+# ── Komut görünümleri ─────────────────────────────────────────────────────────
+
+def assignments_view(rows: list[dict], tz: ZoneInfo, now: datetime, title: str = "<b>Ödevler</b>") -> Message:
+    open_rows = [r for r in rows if not r["submitted"] and not r["done_manual"] and (r["due"] is None or r["due"] > now)]
+    done_rows = [r for r in rows if r not in open_rows]
+    open_rows.sort(key=lambda r: (r["due"] is None, r["due"] or now))
+    lines = [title]
+    if not open_rows:
+        lines.append("\nAçık ödevin yok.")
+    else:
+        lines.append(f"\n<b>Açık ({len(open_rows)})</b>")
+        for r in open_rows:
+            lines.append(
+                f"• <b>{escape(r['title'])}</b> · {escape(r['course'])}\n"
+                f"   {fmt_dt(r['due'], tz, now)}" + (f" · {left(r['due'], now)}" if r["due"] else "")
+            )
+    recent_done = [r for r in done_rows if r["due"] is None or r["due"] > now - timedelta(days=14)]
+    if recent_done:
+        lines.append(f"\n<b>Teslim edilen / süresi geçen ({len(recent_done)})</b>")
+        for r in sorted(recent_done, key=lambda r: r["due"] or now, reverse=True)[:8]:
+            state = "" if r["submitted"] or r["done_manual"] else " · <b>teslim edilmedi</b>"
+            grade = f" · not: {escape(r['grade'])}" if r.get("grade") else ""
+            lines.append(f"• {escape(r['title'])} · {escape(r['course'])}{grade}{state}")
+    buttons = [[Button(clip(r["title"], 32), data=f"det:{r['uid']}")] for r in open_rows[:6]]
+    return Message("\n".join(lines), buttons)
+
+
+AGENDA_LABEL = {"assignment": "Teslim", "live": "Canlı ders", "event": "Etkinlik"}
+
+
+def agenda_view(rows: list[dict], tz: ZoneInfo, now: datetime, days: int, title: str) -> Message:
+    """rows: {'kind','title','course','due','submitted','done_manual'} — tarih sırasına göre ajanda."""
+    end = now + timedelta(days=days)
+    upcoming = sorted((r for r in rows if r["due"] and now - timedelta(hours=1) <= r["due"] <= end), key=lambda r: r["due"])
+    lines = [title]
+    if not upcoming:
+        lines.append("\nBu aralıkta bir şey yok.")
+    current_day = None
+    for r in upcoming:
+        local = r["due"].astimezone(tz)
+        if local.date() != current_day:
+            current_day = local.date()
+            lines.append(f"\n<b>{local.day} {AYLAR_UZUN[local.month - 1]} {GUNLER_UZUN[local.weekday()]}</b>")
+        label = AGENDA_LABEL.get(r["kind"], "")
+        state = " · teslim edildi" if r.get("submitted") or r.get("done_manual") else ""
+        lines.append(f"{local.strftime('%H:%M')}  {label}: {escape(r['title'])} <i>({escape(r['course'])})</i>{state}")
+    return Message("\n".join(lines))
+
+
+def help_text(llm_on: bool) -> str:
+    lines = [
+        "<b>e-Kampüs asistanın</b>",
+        "Yeni ödev, duyuru, not, materyal ve canlı dersleri buraya yazarım; teslimlerden önce hatırlatırım.",
+        "",
+        "/bugun — bugün ve yarın",
+        "/hafta — önümüzdeki 7 gün",
+        "/odevler — açık ödevler",
+        "/notlar — notların",
+        "/duyurular — son duyurular",
+        "/dosyalar — son ders materyalleri",
+        "/dersler — derslerin ve ilerleme",
+        "/takvim — 30 günlük takvim",
+        "/yenile — siteyi şimdi kontrol et",
+        "/bildirimler — uyarı yöneticisi (aç/kapa, sessiz, geçmiş)",
+        "/durum — sistem durumu",
+        "/sessiz 2s — 2 saat acil olmayanları beklet (/sessiz kapat)",
+        "",
+    ]
+    if llm_on:
+        lines.append("Bana normal cümleyle de yazabilirsin: <i>“bu hafta neye odaklanayım?”</i>")
+        lines.append("/llmlog — LLM son cevapta hangi veriye baktı (/llmlog liste, /llmlog 3)")
+        lines.append("/unut — LLM sohbet geçmişini sil")
+    else:
+        lines.append("Serbest soru için LLM bağlı değil; “ödev”, “bugün”, “not” gibi kelimeler yeter.")
+    lines.append("\nMateryaldeki “Gönder” butonu dosyayı sitede açar, yani içerik “görüldü” sayılır.")
+    return "\n".join(lines)
+
+
+def digest_view(rows: list[dict], fresh: dict[str, list], tz: ZoneInfo, now: datetime,
+                last_ok: datetime | None) -> Message:
+    """Sabah özeti: bugün, yaklaşanlar, açık ödevler, son 24 saatte gelenler ve sistemin nabzı."""
+    local = now.astimezone(tz)
+    lines = [f"<b>Günaydın.</b> {local.day} {AYLAR_UZUN[local.month - 1]} {GUNLER_UZUN[local.weekday()]}"]
+
+    def pending(r: dict) -> bool:
+        return r["kind"] != "assignment" or not (r.get("submitted") or r.get("done_manual"))
+
+    today = [r for r in rows if r["due"] and r["due"].astimezone(tz).date() == local.date() and r["due"] >= now and pending(r)]
+    week = [r for r in rows if r["due"] and now < r["due"] <= now + timedelta(days=7) and r not in today and pending(r)]
+    if today:
+        lines.append("\n<b>Bugün</b>")
+        lines += [f"• {r['due'].astimezone(tz):%H:%M} {escape(r['title'])} <i>({escape(r['course'])})</i>" for r in today]
+    if week:
+        lines.append("\n<b>Bu hafta</b>")
+        lines += [f"• {fmt_dt(r['due'], tz, now)} · {escape(r['title'])} <i>({escape(r['course'])})</i>" for r in week[:10]]
+    if not today and not week:
+        lines.append("\nÖnümüzdeki 7 günde teslim ya da etkinlik yok.")
+    open_count = sum(1 for r in rows if r["kind"] == "assignment" and pending(r) and (r["due"] is None or r["due"] > now))
+    if open_count:
+        lines.append(f"\nAçık ödev: <b>{open_count}</b> → /odevler")
+    news = [f"{len(v)} {KIND_LABEL[k]}" for k, v in fresh.items() if v]
+    if news:
+        lines.append("Son 24 saatte gelen: " + ", ".join(news))
+    if last_ok:
+        lines.append(f"Son başarılı kontrol: {fmt_dt(last_ok, tz, now)}")
+    else:
+        lines.append("<b>Henüz başarılı kontrol yok</b>, /durum'a bak.")
+    return Message("\n".join(lines))
+
+
+# ── Uyarı yöneticisi ──────────────────────────────────────────────────────────
+
+HISTORY_LABEL = {"due_changed": "Tarih değişti", "changed": "Güncellendi", "reminder": "Hatırlatma",
+                 "live_soon": "Canlı ders", "scope_added": "İzlemeye alındı", "alert": "Sistem"}
+
+
+def ago(dt: datetime | None, now: datetime) -> str:
+    if dt is None:
+        return "hiç"
+    minutes = int((now - dt).total_seconds() // 60)
+    if minutes < 1:
+        return "az önce"
+    if minutes < 60:
+        return f"{minutes} dk önce"
+    if minutes < 60 * 24:
+        return f"{minutes // 60} sa önce"
+    return f"{minutes // (60 * 24)} gün önce"
+
+
+def on_off(value) -> str:
+    return "açık" if value else "kapalı"
+
+
+def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, str]], tz: ZoneInfo,
+                       now: datetime, night: str) -> Message:
+    lines = ["<b>Uyarı yöneticisi</b>", "", "<b>Sistem</b>"]
+    last_ok = status.get("last_ok")
+    if status.get("fail_streak"):
+        lines.append(f"e-Kampüs: <b>{status['fail_streak']} kontroldür girilemiyor</b>")
+        if status.get("fail_reason"):
+            lines.append(f"   Neden: {escape(status['fail_reason'])}")
+        lines.append(f"   Son başarılı: {ago(last_ok, now)}")
+    elif last_ok:
+        lines.append(f"e-Kampüs: erişim normal, son kontrol {ago(last_ok, now)}")
+    else:
+        lines.append("e-Kampüs: henüz başarılı kontrol yok")
+    if status.get("guard_blocked"):
+        lines.append(f"Giriş: <b>KİLİTLİ</b> ({escape(status.get('guard_reason') or '')}) → /girisdene")
+    else:
+        lines.append("Giriş: sorun yok")
+    if status.get("parse_problems"):
+        lines.append("Okunamayan bölüm: " + escape(", ".join(status["parse_problems"])))
+    lines.append(f"Bildirim: son 24 saatte {status.get('sent_24h', 0)}, bekleyen {status.get('pending', 0)}")
+    muted = status.get("muted_until")
+    if muted and muted > now:
+        lines.append(f"Sessiz: {fmt_dt(muted, tz, now)} kadar (acil olanlar yine gelir)")
+    lines.append(f"Gece modu ({night}): {on_off(prefs.get('night'))}")
+    lines.append("\nAyarı değiştirmek için butona dokun.")
+
+    toggles = [_btn(f"{label}: {on_off(prefs.get(key))}", f"pref:{key}") for key, label in categories]
+    buttons = [toggles[i:i + 2] for i in range(0, len(toggles), 2)]
+    buttons.append([_btn(f"Erişim uyarısı: {prefs.get('fail_after')} hatada", "pref:fail_after"),
+                    _btn(f"Gece modu: {on_off(prefs.get('night'))}", "pref:night")])
+    if muted and muted > now:
+        buttons.append([_btn("Sessizi kapat", "mute:off")])
+    else:
+        buttons.append([_btn("Sessiz 1 sa", "mute:1"), _btn("Sessiz 4 sa", "mute:4"),
+                        _btn("Sabaha kadar sessiz", "mute:morning")])
+    buttons.append([_btn("Son bildirimler", "am:hist"), _btn("Yenile", "am:show")])
+    return Message("\n".join(lines), buttons)
+
+
+def _btn(text: str, data: str) -> Button:
+    return Button(text, data=data)
+
+
+def history_view(rows: list, tz: ZoneInfo, now: datetime) -> Message:
+    lines = ["<b>Son bildirimler</b>"]
+    if not rows:
+        lines.append("\nHenüz bildirim gönderilmedi.")
+    for row in rows:
+        payload = json.loads(row["payload"])
+        title = payload.get("title") or re.sub(r"<[^>]+>", "", payload.get("text", "")).split("\n")[0]
+        if row["type"] == "baseline":
+            label, title = "İzleme başladı", ""
+        elif row["type"] == "new":
+            label = f"Yeni {KIND_LABEL.get(payload.get('kind', ''), 'kayıt')}"
+        else:
+            label = HISTORY_LABEL.get(row["type"], row["type"])
+        sent = datetime.fromisoformat(row["sent_at"]) if row["sent_at"] else None
+        stamp = sent.astimezone(tz).strftime("%d.%m %H:%M") if sent else "?"
+        lines.append(f"{stamp}  {label}" + (f": {escape(clip(title, 60))}" if title else ""))
+    return Message("\n".join(lines), [[Button("Geri", data="am:show")]])
+
+
+# ── LLM kayıtları (/llmlog) ───────────────────────────────────────────────────
+
+def _args_text(args: dict) -> str:
+    return ", ".join(f"{k}={v}" for k, v in (args or {}).items())
+
+
+def llm_log_view(entry: dict, index: int, total: int, tz: ZoneInfo, now: datetime) -> Message:
+    """index 0 = en yeni. Modelin hangi araçla neye baktığını ve ne cevap verdiğini gösterir."""
+    at = parse_dt(entry.get("created_at"))
+    lines = [f"<b>LLM kaydı {index + 1}/{total}</b> · {fmt_dt(at, tz, now)} · {escape(entry.get('kind', ''))}",
+             f"Model: {escape(entry.get('model', '?'))} · {entry.get('tokens', 0)} token · {entry.get('duration_s', '?')} sn"]
+    if entry.get("question"):
+        lines.append(f"Soru: <i>{escape(clip(entry['question'], 200))}</i>")
+    steps = entry.get("steps", [])
+    if not steps:
+        lines.append("\nAraç çağırmadı; sadece kendisine verilen metinle cevapladı.")
+    else:
+        lines.append(f"\n<b>Baktığı veriler ({len(steps)} araç çağrısı)</b>")
+        for i, step in enumerate(steps[:8], 1):
+            count = f"{step['count']} kayıt, " if step.get("count") is not None else ""
+            lines.append(f"{i}. {escape(step['tool'])}({escape(_args_text(step.get('args')))}) → {count}{step.get('chars', 0)} karakter")
+            lines.append(f"<code>{escape(clip(step.get('preview', ''), 220))}</code>")
+        if len(steps) > 8:
+            lines.append(f"… ve {len(steps) - 8} çağrı daha (tamamı JSON'da)")
+    if entry.get("error"):
+        lines.append(f"\n<b>Hata:</b> {escape(entry['error'])}")
+    elif entry.get("answer") is not None:
+        lines.append(f"\n<b>Cevap</b> ({len(entry['answer'])} karakter)\n{escape(clip(entry['answer'], 400))}")
+    nav = []
+    if index + 1 < total:
+        nav.append(Button("Daha eski", data=f"llm:{index + 1}"))
+    if index > 0:
+        nav.append(Button("Daha yeni", data=f"llm:{index - 1}"))
+    buttons = [nav] if nav else []
+    buttons.append([Button("Tam veriyi gönder (JSON)", data=f"llmraw:{entry['id']}"), Button("Liste", data="llm:list")])
+    return Message("\n".join(lines), buttons)
+
+
+def llm_log_list_view(entries: list[dict], tz: ZoneInfo, now: datetime) -> Message:
+    lines = ["<b>Son LLM kayıtları</b>"]
+    if not entries:
+        lines.append("\nHenüz kayıt yok. Bota bir soru sorunca burada görünür.")
+    buttons = []
+    for i, e in enumerate(entries):
+        at = parse_dt(e.get("created_at"))
+        tools = ", ".join(dict.fromkeys(s["tool"] for s in e.get("steps", []))) or "araç yok"
+        state = " · hata" if e.get("error") else ""
+        lines.append(f"{i + 1}. {fmt_dt(at, tz, now)} · {escape(e.get('kind', ''))} · {e.get('tokens', 0)} token{state}\n"
+                     f"   {escape(clip(e.get('question', ''), 60))} <i>[{escape(tools)}]</i>")
+        buttons.append(Button(str(i + 1), data=f"llm:{i}"))
+    return Message("\n".join(lines), [buttons[j:j + 5] for j in range(0, len(buttons), 5)])
