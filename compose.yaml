@@ -1,0 +1,18 @@
+services:
+  ekampus:
+    build: .
+    image: ekampus-asistan:latest
+    container_name: ekampus
+    env_file: .env
+    environment:
+      # .env'deki boş DATA_DIR/HEADLESS değerleri imajın ayarlarını ezmesin
+      DATA_DIR: /data
+      HEADLESS: "true"
+    volumes:
+      - ekampus-data:/data
+    init: true
+    shm_size: "1gb"   # Chromium /dev/shm'e yazar; varsayılan 64 MB çökmeye yol açar
+    restart: unless-stopped
+
+volumes:
+  ekampus-data:
