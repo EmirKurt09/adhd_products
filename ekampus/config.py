@@ -97,6 +97,7 @@ class Settings:
     live_lesson_reminder_min: int
     data_dir: Path
     headless: bool
+    llm_history_messages: int = 20
 
     @property
     def session_path(self) -> Path:
@@ -198,4 +199,5 @@ def load_settings() -> Settings:
         live_lesson_reminder_min=_int("LIVE_LESSON_REMINDER_MIN", 15),
         data_dir=data_dir,
         headless=_bool("HEADLESS", True),
+        llm_history_messages=max(0, _int("LLM_HISTORY_MESSAGES", 20)),
     )
