@@ -9,13 +9,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from html import escape as _esc
+from pathlib import PurePosixPath
 from typing import Awaitable, Callable
+from urllib.parse import unquote, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -281,12 +284,11 @@ class Engine:
             scanner = Scanner(campus, self.s)
             return P.parse_assignment_detail(await scanner.get_with_session(f"/assignment/details/{int(uid)}"))
 
-    async def download(self, url: str) -> tuple[str, bytes | None, str]:
-        """(dosya adı, içerik ya da çok büyükse None, adres)."""
+    async def download(self, url: str, title: str = "") -> Download:
         async with self.lock, Campus(self.s) as campus:
-            return await _download(campus, url)
+            return await _download(campus, url, title)
 
-    async def fetch_material(self, uid: str) -> tuple[str, bytes | None, str]:
+    async def fetch_material(self, uid: str) -> Download:
         """Ders materyalini açar (kullanıcı isteğiyle; içerik "görüldü" sayılır) ve dosyasını indirir."""
         item = self.store.item("file", uid)
         if not item:
@@ -297,21 +299,46 @@ class Engine:
             response = await campus.context.request.get(item["url"], timeout=60_000)
             file_url = P.parse_content_file(await response.text())
             if not file_url:
-                raise LookupError("bu içerikte indirilebilir dosya yok (video ya da bağlantı olabilir)")
-            return await _download(campus, file_url)
+                raise NotAFile(response.url)
+            return await _download(campus, file_url, item["title"])
 
 
-async def _download(campus: Campus, url: str) -> tuple[str, bytes | None, str]:
-    name = re.sub(r"[?#].*$", "", url.rsplit("/", 1)[-1]) or "dosya"
+@dataclass
+class Download:
+    filename: str
+    body: bytes | None   # None: Telegram'ın 50 MB sınırından büyük, sadece link gönderilir
+    url: str
+
+
+class NotAFile(Exception):
+    """Materyal indirilebilir bir dosya değil (video, bağlantı vb.); args[0] içeriğin sitedeki adresi."""
+
+
+_UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def material_filename(title: str, url: str, content_type: str = "") -> str:
+    """Telegram'da görünecek dosya adı: materyalin başlığı + dosyanın gerçek uzantısı."""
+    ext = PurePosixPath(unquote(urlsplit(url).path)).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,5}", ext):
+        ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ""
+    base = re.sub(r"\s+", " ", _UNSAFE_NAME.sub(" ", title or "")).strip(" .")[:80]
+    if not base:
+        base = PurePosixPath(unquote(urlsplit(url).path)).stem or "dosya"
+    return base if base.lower().endswith(ext) else base + ext
+
+
+async def _download(campus: Campus, url: str, title: str = "") -> Download:
     head = await campus.context.request.head(url, timeout=30_000)
     size = int(head.headers.get("content-length", "0") or 0)
+    filename = material_filename(title, url, head.headers.get("content-type", ""))
     if size > TELEGRAM_FILE_LIMIT:
-        return name, None, url
+        return Download(filename, None, url)
     response = await campus.context.request.get(url, timeout=120_000)
     if response.status >= 400:
         raise FetchError(f"dosya indirilemedi: HTTP {response.status}")
     body = await response.body()
-    return name, (body if len(body) <= TELEGRAM_FILE_LIMIT else None), url
+    return Download(filename, body if len(body) <= TELEGRAM_FILE_LIMIT else None, url)
 
 
 

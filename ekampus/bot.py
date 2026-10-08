@@ -41,7 +41,7 @@ from . import messages as M
 from . import prefs as PR
 from .browser import AuthGuard
 from .config import Settings
-from .engine import Engine, describe_failure, utcnow
+from .engine import Download, Engine, NotAFile, describe_failure, utcnow
 from .llm import Assistant, make_assistant
 from .lock import InstanceLock
 from .store import Store
@@ -49,12 +49,12 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 KEYBOARD = ReplyKeyboardMarkup(
-    [["Bugün", "Ödevler"], ["Hafta", "Notlar"], ["Yenile", "Bildirimler", "Durum"]],
+    [["Bugün", "Ödevler"], ["Hafta", "Notlar", "Dosyalar"], ["Yenile", "Bildirimler", "Durum"]],
     resize_keyboard=True, is_persistent=True,
 )
 COMMANDS = [
     ("bugun", "Bugün ve yarın"), ("hafta", "Önümüzdeki 7 gün"), ("odevler", "Açık ödevler"),
-    ("notlar", "Notlar"), ("duyurular", "Son duyurular"), ("dosyalar", "Son ders materyalleri"),
+    ("notlar", "Notlar"), ("duyurular", "Son duyurular"), ("dosyalar", "Ders materyalleri: ders seç, dosyayı al"),
     ("dersler", "Dersler ve ilerleme"), ("takvim", "30 günlük takvim"), ("yenile", "Siteyi şimdi kontrol et"),
     ("bildirimler", "Uyarı yöneticisi: aç/kapa, sessiz, geçmiş"), ("durum", "Sistem durumu"),
     ("sessiz", "Bildirimleri beklet: /sessiz 2s"), ("unut", "Sohbet geçmişini sil"),
@@ -178,20 +178,30 @@ async def cmd_announcements(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await reply(update, M.Message("\n".join(lines)))
 
 
+def _materials(c: Ctx) -> list[dict]:
+    return c.store.items(("file",), limit=1000)
+
+
+def materials_menu(c: Ctx, course_id: str | None = None, page: int = 0) -> M.Message:
+    rows = _materials(c)
+    if course_id is None:
+        return M.materials_courses_view(rows)
+    course_rows = [r for r in rows if r["scope"] == f"course:{course_id}"]
+    if not course_rows:
+        return M.materials_courses_view(rows)
+    return M.materials_list_view(course_id, course_rows, page)
+
+
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Önce ders seçilir, sonra o dersin materyalleri listelenir; dokunulan materyal dosya olarak gelir."""
     c = deps(context)
     query = " ".join(context.args or []).casefold()
-    rows = [r for r in c.store.items(("file",), limit=300) if not query or query in r["course"].casefold()]
-    if not rows:
-        await reply(update, M.Message("Materyal bulunamadı."))
-        return
-    lines = ["<b>Son ders materyalleri</b>" + (f" · {escape(query)}" if query else "")]
-    for r in rows[:15]:
-        seen = "" if r["meta"].get("viewed") else " · <b>açılmadı</b>"
-        lines.append(f"• {escape(r['title'])} <i>({escape(r['course'])})</i>{seen}")
-    lines.append("\nDersle süzmek için: /dosyalar ağlar\nAşağıdakilere dokunursan dosyayı gönderirim:")
-    buttons = [[M.Button(M.clip(r["title"], 32), data=f"file:{r['uid']}")] for r in rows[:6]]
-    await reply(update, M.Message("\n".join(lines), buttons))
+    if query:  # /dosyalar ağlar → doğrudan o dersin listesi
+        match = next((r for r in _materials(c) if query in r["course"].casefold()), None)
+        if match:
+            await reply(update, materials_menu(c, match["scope"].split(":", 1)[-1]))
+            return
+    await reply(update, materials_menu(c))
 
 
 async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -375,6 +385,7 @@ async def _edit(query, message: M.Message) -> None:
 BUTTON_ROUTES = {
     "Bugün": cmd_today, "Ödevler": cmd_assignments, "Hafta": cmd_week,
     "Notlar": cmd_grades, "Yenile": cmd_refresh, "Durum": cmd_status, "Bildirimler": cmd_manager,
+    "Dosyalar": cmd_files,
 }
 KEYWORD_ROUTES = [
     (("ödev", "odev", "teslim"), cmd_assignments), (("bugün", "bugun", "yarın", "yarin"), cmd_today),
@@ -466,6 +477,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "llmraw":
         await query.answer("JSON hazırlanıyor…")
         await send_llm_raw(update.effective_chat.id, int(arg), context)
+    elif action == "fc":
+        await query.answer()
+        course_id, _, page = arg.partition(":")
+        if course_id == "list":
+            await _edit(query, materials_menu(c))
+        else:
+            await _edit(query, materials_menu(c, course_id, int(page or 0)))
     elif action == "att":
         await query.answer("Eki indiriyorum…")
         uid, _, index = arg.partition(":")
@@ -527,13 +545,33 @@ async def show_assignment(chat_id: int, uid: str, context: ContextTypes.DEFAULT_
 async def send_material(chat_id: int, uid: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     c = deps(context)
     item = c.store.item("file", uid)
+    if not item:
+        await context.bot.send_message(chat_id, "Bu materyali bulamadım; /dosyalar ile listeyi yenile.")
+        return
+    caption = f"{escape(item['title'])}\n<i>{escape(item['course'])}</i>"
+    cache_key = f"tgfile:{uid}:{item['fingerprint']}"
+    cached = c.store.get(cache_key)
+    if cached:  # daha önce gönderildi: Telegram'daki kopyayı yolla, siteye hiç gitme
+        try:
+            await context.bot.send_document(chat_id, document=cached, caption=caption)
+            return
+        except TelegramError as e:
+            log.info("Önbellekteki dosya gönderilemedi, yeniden indiriliyor: %s", e)
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
     try:
-        name, body, url = await c.engine.fetch_material(uid)
-    except Exception as e:  # noqa: BLE001
+        download = await c.engine.fetch_material(uid)
+    except NotAFile as e:
+        page = e.args[0] if e.args else item["url"]
+        await send(context.bot, chat_id, M.Message(
+            f"<b>{escape(item['title'])}</b> indirilebilir bir dosya değil (video ya da bağlantı olabilir).",
+            [[M.Button("Sitede aç", url=page)]]))
+        return
+    except Exception as e:  # noqa: BLE001 - kullanıcıya düz bir hata mesajı yeter
         await context.bot.send_message(chat_id, f"Dosyayı alamadım: {escape(str(e)[:200])}")
         return
-    await _send_file(context, chat_id, name, body, url, item["title"] if item else name, item["course"] if item else "")
+    sent = await _send_file(context, chat_id, download, caption)
+    if sent is not None and sent.document is not None:
+        c.store.set(cache_key, sent.document.file_id)
 
 
 async def send_attachment(chat_id: int, uid: str, index: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -545,19 +583,19 @@ async def send_attachment(chat_id: int, uid: str, index: int, context: ContextTy
     label, url = attachments[index]
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
     try:
-        name, body, url = await c.engine.download(url)
+        download = await c.engine.download(url, label)
     except Exception as e:  # noqa: BLE001
         await context.bot.send_message(chat_id, f"Eki indiremedim: {escape(str(e)[:200])}\n{escape(url)}")
         return
-    await _send_file(context, chat_id, label or name, body, url, label, "")
+    await _send_file(context, chat_id, download, escape(label))
 
 
-async def _send_file(context, chat_id: int, name: str, body: bytes | None, url: str, title: str, course: str) -> None:
-    caption = f"{escape(title)}" + (f"\n{escape(course)}" if course else "")
-    if body is None:
-        await context.bot.send_message(chat_id, f"{caption}\nDosya Telegram sınırından (50 MB) büyük, link: {escape(url)}")
-        return
-    await context.bot.send_document(chat_id, document=body, filename=name, caption=caption)
+async def _send_file(context, chat_id: int, download: Download, caption: str):
+    if download.body is None:
+        await send(context.bot, chat_id, M.Message(f"{caption}\nDosya Telegram sınırından (50 MB) büyük.",
+                                                   [[M.Button("İndir", url=download.url)]]))
+        return None
+    return await context.bot.send_document(chat_id, document=download.body, filename=download.filename, caption=caption)
 
 
 # ── Arka plan işleri ──────────────────────────────────────────────────────────
