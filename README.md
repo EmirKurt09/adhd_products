@@ -116,6 +116,18 @@ docker compose logs -f
 
 Compose aynı `.env` dosyasını okur ve verileri `ekampus-data` volume'ünde tutar. İmaj amd64 ve arm64'te çalışır (Oracle free tier ARM dahil).
 
+### Sunucuya dağıtım
+
+```bash
+DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh --env        # ilk kurulum: .env de gider
+DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh              # sonraki güncellemeler
+```
+
+- Kod GitHub'dan değil yerel repodan gider, yani sadece commit'lenmiş hali (HEAD) gönderilir; sunucuda git erişimi gerekmez.
+- `.env` SSH tünelinden doğrudan sunucudaki `/opt/ekampus/.env` dosyasına yazılır. Dosyayı sadece root okuyabilir ve satır sonlarındaki CRLF temizlenir.
+- `--no-start` verilirse kod gönderilir ve derlenir ama bot başlatılmaz.
+- Konteyner paylaşılan sunucudaki diğer servisleri etkilemesin diye sınırlıdır: en fazla 1,5 GB bellek, 1,5 CPU ve 30 MB log.
+
 ⚠️ Aynı anda tek bot çalışmalı: buluta geçince PC'deki görevi kaldır (`windows-autostart.ps1 -Remove`). İki bot birden çalışırsa Telegram çakışma hatası verir.
 
 Sunucuda captcha çıkarsa PC'de `login --headed` ile giriş yap, sonra oturumu konteynere kopyala:
