@@ -97,7 +97,8 @@ Her LLM çağrısı (soru, çağrılan araçlar, gördüğü veri, cevap) kayded
 | `check [--dry-run]` | Tek tarama turu yapar; `--dry-run` sadece gösterir |
 | `login [--headed] [--force]` | Giriş yapar ve oturumu kaydeder. `--headed` captcha için görünür tarayıcıda giriş yaptırır, `--force` login kilidini sıfırlar |
 | `explore [--max-pages N]` | Siteyi sadece okuyarak keşfeder (HTML, ekran görüntüsü, JSON, HAR) |
-| `setup-telegram` / `test-notify` | Chat id'leri listeler / deneme mesajı gönderir |
+| `setup-telegram` | Bota yazan chat'lerin id'lerini listeler |
+| `test-notify [--olay odev]` | Deneme mesajı gönderir; `--olay odev` gerçek bir ödevin verisiyle "[TEST]" başlıklı yeni ödev bildirimini botun normal hattından geçirir (butonlar ve LLM özeti dahil) |
 | `health` | Konteyner sağlık kontrolü (heartbeat) |
 
 Veriler (`state.db`, `session.json`, loglar) Windows'ta `%LOCALAPPDATA%\ekampus`, Docker'da `/data` altında durur ve oturum çerezi içerdiği için ne repoya ne OneDrive'a girer.
