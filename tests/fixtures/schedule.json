@@ -1,0 +1,4 @@
+[{"CourseName":"Test Dersi","ScheduleName":"Ödev B","TypeName":"assignment","Title":"Test Dersi - Ödev B","Start":"2026-10-01T10:00:00","End":"2026-10-15T23:59:00","Description":"<p>Birinci satır</p><p><strong>İkinci</strong> satır <a href=\"https://ornek.com\">link</a></p>","Url":"/assignment/details/72"},
+ {"CourseName":"Test Dersi","ScheduleName":"Ödev C","TypeName":"assignment","Title":"Test Dersi - Ödev C","Start":"2026-10-05T10:00:00","End":"2026-10-20T23:59:00","Description":null,"Url":"/assignment/details/73"},
+ {"CourseName":"Test Dersi","ScheduleName":"Canlı Ders 3","TypeName":"VirtualClass","Title":"Test Dersi - Canlı Ders 3","Start":"2026-10-10T14:00:00","End":"2026-10-10T15:30:00","Description":"","Url":"/VirtualClass/Details/55"},
+ {"CourseName":"Test Dersi","ScheduleName":"Vize","TypeName":"exam","Title":"Test Dersi - Vize","Start":"2026-11-01T10:00:00","End":"2026-11-01T11:00:00","Description":"","Url":"/exam/details/9"}]
