@@ -30,6 +30,7 @@ GROUPS = {
     "telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_CHAT_ID"),
     "llm": ("LLM_API_KEY",),
     "pushover": ("PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY"),  # isteğe bağlı: sistem uyarıları kanalı
+    "jev": ("TYPESAFE_API_KEY",),                             # isteğe bağlı: bulgular için hızlı karar katmanı
 }
 
 
@@ -163,6 +164,7 @@ class Settings:
             "LLM_API_KEY": self.llm_api_key,
             "PUSHOVER_APP_TOKEN": self.pushover_app_token,
             "PUSHOVER_USER_KEY": self.pushover_user_key,
+            "TYPESAFE_API_KEY": self.typesafe_api_key,
         }
         return [name for name in GROUPS[group] if not values[name]]
 

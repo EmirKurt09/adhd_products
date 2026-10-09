@@ -13,8 +13,10 @@ import threading
 import time
 from pathlib import Path
 
+from . import prefs as PR
 from .config import Settings
 from .pushover import Pushover
+from .store import Store
 
 log = logging.getLogger(__name__)
 
@@ -54,10 +56,23 @@ def _restart(settings: Settings, pushover: Pushover | None, age: float) -> None:
         settings.watchdog_marker_path.write_text(f"heartbeat {int(age)} sn", encoding="utf-8")
     except OSError:
         pass
-    if pushover is not None:
+    if pushover is not None and _pushover_enabled(settings):
         try:
             pushover.send_sync(text, priority=1)
         except Exception as e:  # noqa: BLE001 - kapanmayı hiçbir şey engellememeli
             log.error("Pushover'a takılma bildirilemedi: %s", e)
     logging.shutdown()
     os._exit(EXIT_CODE)
+
+
+def _pushover_enabled(settings: Settings) -> bool:
+    """/ayarlar'daki Pushover anahtarı. Bekçi ayrı thread'de olduğu için kendi kısa bağlantısıyla okur;
+    okuyamazsa göndermeyi seçer (takılma haberi kaybolmasın)."""
+    try:
+        store = Store(settings.db_path)
+        try:
+            return bool(PR.load(store).get("pushover", True))
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001
+        return True

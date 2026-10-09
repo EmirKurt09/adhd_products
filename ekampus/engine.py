@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 
+from . import features
 from . import parse as P
 from . import prefs as PR
 from .browser import AuthBlocked, AuthError, AuthGuard, Campus, CaptchaRequired, LoginCooldown, LoginRejected
@@ -90,6 +91,10 @@ class Engine:
 
     def set_mute(self, until: datetime | None) -> None:
         self.store.set("mute_until", until.isoformat() if until else "")
+
+    def feature_on(self, key: str) -> bool:
+        """LLM/JEV/Pushover: anahtarı var ve kullanıcı açık bırakmış mı (her çağrıda yeniden bakılır)."""
+        return features.usable(self.s, self.store, key)
 
     # ── Tarama turu ───────────────────────────────────────────────────────
     async def run_scan(self, reason: str = "zamanlanmış") -> ScanOutcome:
@@ -381,9 +386,9 @@ class Engine:
         return sent
 
     def _alert_sender(self, telegram: Sender) -> Sender:
-        """Sistem uyarısı: önce Pushover; gönderilemezse kaybolmasın diye Telegram'a düş."""
+        """Sistem uyarısı: önce Pushover (ayarlardan kapalı değilse); gönderilemezse kaybolmasın diye Telegram'a düş."""
         async def send(message: Message, context: dict) -> None:
-            if self.alert_channel is not None:
+            if self.alert_channel is not None and self.feature_on("pushover"):
                 try:
                     await self.alert_channel(message.text, int(context.get("priority", 0)))
                     return

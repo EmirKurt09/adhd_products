@@ -19,7 +19,9 @@ CATEGORIES: list[tuple[str, str]] = [
     ("system", "Sistem uyarıları"),
 ]
 FAIL_AFTER_CHOICES = (1, 2, 3, 5)
-DEFAULTS: dict = {key: True for key, _ in CATEGORIES} | {"fail_after": 2, "night": True}
+FEATURE_KEYS = ("llm", "jev", "pushover")  # anahtara bağlı özelliklerin aç/kapa durumu (bkz. features.py)
+DEFAULTS: dict = ({key: True for key, _ in CATEGORIES} | {"fail_after": 2, "night": True}
+                  | {key: True for key in FEATURE_KEYS})
 
 _KIND_CATEGORY = {
     "assignment": "assignment", "grade": "grades", "announcement": "announcements",

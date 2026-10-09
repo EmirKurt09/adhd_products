@@ -34,7 +34,7 @@ async def run(settings: Settings) -> int:
         add(FAIL, "Veri dizini", f"{settings.data_dir} yazılamıyor: {e}")
 
     for group in GROUPS:
-        if group == "pushover":
+        if group in ("pushover", "jev"):
             continue  # isteğe bağlı; aşağıda ayrıca kontrol edilir
         missing = settings.missing(group)
         add(OK if not missing else WARN, f".env [{group}]", "tamam" if not missing else f"eksik: {', '.join(missing)}")

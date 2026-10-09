@@ -1,12 +1,14 @@
 """Pushover kanalı, uyarı yönlendirmesi, hata artışı, çökme algılama ve bekçi (ağ çağrısı yok)."""
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
 
+from ekampus import prefs as PR
 from ekampus.engine import Engine
 from ekampus.models import Event
 from ekampus.pushover import MAX_MESSAGE, Pushover, PushoverError, to_pushover_html
@@ -75,6 +77,8 @@ def test_validate_returns_devices():
 # ── Uyarı yönlendirmesi ───────────────────────────────────────────────────────
 
 def make_engine(settings, channel=None):
+    if channel is not None:  # kanal sadece anahtarlar varken kurulur
+        settings = replace(settings, pushover_app_token="APPTOKEN", pushover_user_key="USERKEY")
     return Engine(settings, Store(":memory:"), alert_channel=channel)
 
 
@@ -111,6 +115,18 @@ def test_pushover_failure_falls_back_to_telegram(settings):
     assert flush(engine) == ["sistem uyarısı"]
     assert engine.store.outbox_by_key("alert:x")["status"] == "sent"
     assert "pushover" in engine.store.get("errors")
+
+
+def test_pushover_turned_off_in_settings_uses_telegram(settings):
+    pushed = []
+
+    async def channel(text, priority):
+        pushed.append(text)
+
+    engine = make_engine(settings, channel)
+    PR.toggle(engine.store, "pushover")  # /ayarlar → Pushover kapalı
+    engine.alert("x", "sistem uyarısı", DAY)
+    assert flush(engine) == ["sistem uyarısı"] and pushed == []
 
 
 def test_without_pushover_alerts_stay_on_telegram(settings):
@@ -195,7 +211,6 @@ def priorities(engine) -> dict[str, int]:
 
 
 def test_priority_table(settings):
-    from ekampus import prefs as PR
     from ekampus.browser import LoginRejected
 
     engine = make_engine(settings)
