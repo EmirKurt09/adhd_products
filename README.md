@@ -4,7 +4,7 @@
 
 e-Kampüs yeni bir ödev, duyuru ya da not girildiğinde öğrenciye haber vermiyor. Bir şeyin değişip değişmediğini anlamak için siteye sürekli girip bakmak gerekiyor; dikkat dağınıklığı yaşayan biri için bu, kaçan teslim tarihleri demek.
 
-Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Telegram'a yazar. Teslimlerden önce hatırlatır, her sabah günün özetini çıkarır. Sohbete normal cümleyle yazılan her şeyi bir LLM ajanı karşılar: sitedeki gerçek veriye bakarak cevap verir, botu da yönetir. Örneğin "cuma 18'e kadar rahatsız etme", "yarın 10'da raporu hatırlat" ya da "Ağlar'ı bıraktım, aklında olsun" demek yeter.
+Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Telegram'a yazar. Teslimlerden önce hatırlatır, her sabah günün özetini çıkarır. Sohbete normal cümleyle yazılan her şeyi bir LLM agent karşılar: sitedeki gerçek veriye bakarak cevap verir, botu da yönetir. Örneğin "cuma 18'e kadar rahatsız etme", "yarın 10'da raporu hatırlat" ya da "Ağlar'ı bıraktım, aklında olsun" demek yeter.
 
 ## Özellikler
 
@@ -14,7 +14,7 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
   - Teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce.
   - Her sabah günün özeti.
   - Öğrencinin kendi kurduğu saatli hatırlatmalar.
-- **LLM ajanı:** Sohbete yazılan mesajı Grok ya da DeepSeek araçlarla cevaplar ve botu yönetir:
+- **LLM agent:** Sohbete yazılan mesajı Grok ya da DeepSeek tool calling ile cevaplar ve botu yönetir:
   - **Site:** Siteyi hemen kontrol edip yeni gelenleri tek tek söyler. Ödev sayfasını canlı açar, ekleri ve materyalleri (bir seferde 10'a kadar) gönderir. Kilitlenen girişi tekrar dener.
   - **Belgeler:** PDF materyalleri ve ödev eklerini okur, içinden soru cevaplar, kaynak sayfayı söyler. PDF gönderdiğinde okumayı teklif eder; gönderilen PDF'nin altında "Oku ve özetle" butonu çıkar.
   - **Bildirimler:** Belirli bir saate kadar sessiz mod (acil olanlar gelsin ya da hiçbir şey gelmesin). Bildirim türlerini, özellikleri ve tek bir dersi kapatıp açar. Biriken bildirimleri gösterip hemen gönderir, geçmiş bir bildirimi tekrar yollar.
@@ -22,12 +22,10 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
   - **Durum ve ayarlar:** Aktif hatırlatma takvimini, botun durumunu ve veritabanını gösterir; veritabanına salt okunur SQL ile bakar. Sabah özetini hemen gönderir, özet ve gece saatlerini değiştirir, erişim uyarısı eşiğini ayarlar.
 
   Yaptığı her değişiklik cevabın altında "Yapılanlar" olarak listelenir.
-- **Eylem kontrolü (JEV):** Ajan bir şeyi kapatmak, susturmak ya da silmek gibi riskli bir eylem yapmadan önce JEV'e sorar: öğrenci bunu açıkça istedi mi, riskli mi? İstenmemiş riskli eylem durdurulur ve ajan ne istediğini sorar. Döngüde insan yoktur; bir öneriyi "evet" diye onaylamak da istek sayılır.
-- **Kalıcı hafıza:** Ajan, öğrencinin söylediği kalıcı tercihleri ve bilgileri (bırakılan ders, çalışma saatleri…) kendisi not eder ve sonraki her cevapta dikkate alır. Notlar `/hafiza`'dan görülür ve silinir.
-- **Karar katmanı (JEV):** Her yeni bulgu önce TypeSafe JEV'e sorulur.
-  - JEV bulgunun teslim gerektirip gerektirmediğine, sınavla ya da tarih değişikliğiyle ilgili olup olmadığına bakar.
-  - Uyarı gönderilip gönderilmeyeceğine ve LLM'in açıklama yazıp yazmayacağına karar verir.
-  - Emin olmadığı durumları LLM'e bırakır.
+- **Kalıcı hafıza:** Agent, öğrencinin söylediği kalıcı tercihleri ve bilgileri (bırakılan ders, çalışma saatleri…) kendisi kaydeder ve sonraki her cevapta dikkate alır. Notlar `/hafiza`'dan görülür ve silinir.
+- **JEV (TypeSafe):** İki yerde kullanılır; JEV sadece olasılık döner, kararı backend threshold'larla verir.
+  - **Finding triage:** Her yeni finding için teslim, sınav, tarih değişikliği, açıklama ihtiyacı ve "hemen uyarılsın mı" olasılıklarını verir. Emin olunan finding'ler doğrudan alert olur, kararsızlar LLM'e gider.
+  - **Action guardrail:** Agent riskli bir action tool çağırdığında, tool çalışmadan önce JEV'e "öğrenci bunu açıkça istedi mi, riskli mi" diye sorulur. İstenmemiş riskli action yapılmaz, agent öğrenciye sorar. Human-in-the-loop yoktur; bir öneriyi "evet" diye onaylamak da istek sayılır.
 - **Uyarı yöneticisi:** Bildirim türleri açılıp kapatılabilir; gece modu ve iki seviyeli sessiz mod vardır. Siteye erişilemediğinde açıklamalı uyarı gelir.
 - **Sistem izleme:** Çökme, takılma, hata artışı, siteye erişilememesi ve giriş sorunları Pushover'a bildirilir. Takılan bot kendini yeniden başlatır.
 - **İsteğe bağlı özellikler:** LLM, JEV ve Pushover anahtarı varsa çalışır ve `/ayarlar`'dan açılıp kapatılır. Anahtarı olmayan özelliği bot açılışta, `/durum`'da ve `/ayarlar`'da "çalışmıyor: .env'de X yok" diye bildirir. Bot bunların hiçbiri olmadan da takip, bildirim ve hatırlatma yapar.
@@ -35,76 +33,134 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
 
 ## Nasıl çalışır
 
-Bot iki hattan oluşur: taramadan gelen **bulgular** ve öğrencinin yazdığı **sohbet**. JEV ikisinde de bir karar noktasında durur ama farklı görevle: bulgu hattında öncüdür, sohbet hattında bekçidir. Sohbetin kendisi JEV'e hiç uğramaz.
+Backend tek bir Python process'idir ve Docker container'ında (`ekampus`) çalışır: Telegram bot (long polling), JobQueue ile zamanlanmış işler (scan, outbox flush, reminder, digest), scanner, LLM agent ve SQLite. Ayrı bir web servisi ya da worker yoktur. Dışarıdaki her şey HTTP üzerinden konuşulan external service'tir.
 
-### Bulgu hattı: JEV öncü
-
-```mermaid
-flowchart LR
-    S[e-Kampüs] -->|Playwright, salt okunur| T[Tarama ve<br/>fark algılama]
-    T --> DB[(SQLite)]
-    T -->|her yeni ya da<br/>değişen kayıt| Q[Bildirim kuyruğu]
-    Q --> TG[Telegram]
-    T -->|yeni bulgular| JB{"JEV<br/>bulgu kararı"}
-    JB -->|emin: önemli| PO[Pushover uyarısı]
-    JB -->|kararsız| AT["LLM<br/>bağlama bakıp karar"]
-    JB -->|açıklama gerekli| AE["LLM<br/>kısa açıklama"]
-    JB -->|önemsiz| N[Sadece normal bildirim]
-    AT -->|önemliyse| PO
-    AE --> Q
-    Q -->|sistem uyarıları| PO
-
-    classDef optional stroke-dasharray: 5 5
-    class JB,AT,AE,PO optional
-```
-
-Bot belirli aralıklarla e-Kampüs'e girer; ders sayfalarını, takvimi ve duyuruları okur. Okuduğu her şeyi bir önceki durumla karşılaştırır. Yeni ya da değişen her kayıt bir bildirime dönüşür ve Telegram'a iletilene kadar kuyrukta bekler.
-
-Her yeni bulgu ayrıca JEV'e gider:
-- **Emin olduğunda:** JEV öne çıkan uyarıyı kendisi gönderir; uyarı kararı için LLM'e gidilmez.
-- **Kararsız kaldığında:** Kararı LLM verir; LLM gerekirse araçlarla bağlama bakar.
-- **Açıklama gerektiğinde:** LLM kısa bir açıklama yazar, asıl bildirimden sonra gelir.
-- **Önemsiz bulgularda:** Sadece normal bildirim gelir.
-
-### Sohbet hattı: JEV bekçi
-
-```mermaid
-flowchart LR
-    U((Öğrenci)) -->|serbest metin| TG[Telegram]
-    TG -->|JEV'e uğramaz| A["LLM ajanı<br/>Grok / DeepSeek<br/>kalıcı hafıza"]
-    A -->|okuma, SQL| DB[(SQLite)]
-    A -->|ödev sayfası, PDF| S[e-Kampüs]
-    A -->|risksiz eylem| DO["Eylem yapılır<br/>ayar, hatırlatma,<br/>hafıza, dosya"]
-    A -->|riskli eylem| JA{"JEV<br/>eylem kontrolü"}
-    JA -->|öğrenci istedi| DO
-    JA -->|istenmedi ve riskli| ST["Durur<br/>ajan öğrenciye sorar"]
-    DO --> DB
-    A -->|cevap, dosyalar,<br/>Yapılanlar| TG
-
-    classDef optional stroke-dasharray: 5 5
-    class A,JA optional
-```
-
-Sohbete yazılan mesaj doğrudan LLM ajanına gider. Ajan okuma araçlarıyla kayıtlara, hatırlatma takvimine, botun durumuna ve salt okunur SQL ile veritabanına bakar. Site araçlarıyla ödev sayfasını açar ve PDF okur. Eylem araçlarıyla ayarları, hatırlatmaları ve hafızayı değiştirir, dosya gönderir.
-
-Risksiz eylemler hemen yapılır. Kapatma, susturma ya da silme gibi riskli bir eylemden önce JEV'e sorulur; öğrenci açıkça istemediyse eylem durur ve ajan ne istendiğini sorar. Her eylem cevabın altında "Yapılanlar" olarak listelenir.
-
-### JEV'in iki görevi
-
-| | Bulgu kararı | Eylem kontrolü |
+| Bileşen | Nerede | Görevi |
 |---|---|---|
-| Ne zaman | Taramada her yeni ya da değişen bulgu | Ajan riskli bir eylem yapmadan hemen önce |
-| JEV'e giden | Bulgunun metni ve kodda hesaplanmış gerçekler (kalan saat, teslim durumu, tarih öne mi alındı) | Öğrencinin mesajı, son birkaç mesaj ve önerilen eylem |
-| Sorular | Teslim gerektiriyor mu, sınavla mı ilgili, tarih değişikliği mi, eylem gerekli mi, açıklama işe yarar mı, hemen uyarılsın mı | Öğrenci bunu açıkça istedi mi, eylem riskli mi |
-| Karar (kodda) | Uyarı olasılığı %80 ve üstü: uyarı. %30-80: LLM'e sor. %30 ve altı: uyarı yok. Açıklama olasılığı %60 ve üstü: LLM açıklar. | İstendi %60 ve üstü: yapılır. İstendiği belli değilse sadece risk %25'in altındaysa yapılır, yoksa durur. |
-| JEV kapalıysa | Bulgular doğrudan LLM'e gider | Kontrol yapılmaz, eylem yapılır |
-| LLM kapalıysa | Kararsız bulgular kaçmasın diye uyarı olarak gider | Sohbet ajanı da kapalıdır |
+| Scanner (`scan.py`, `browser.py`) | Backend, Playwright/Chromium | e-Kampüs'e girer, sayfaları ve JSON endpoint'lerini okur (salt okunur) |
+| Diff (`detect.py`) | Backend | Okunanı önceki durumla karşılaştırır, event üretir |
+| Store (`store.py`) | Backend, SQLite | Kayıtlar, outbox, sohbet geçmişi, hafıza, okunmuş PDF'ler, LLM log'ları |
+| Outbox flush (`engine.py`) | Backend, JobQueue | Bekleyen bildirimleri gönderir; sessiz mod, gece modu, kategori ve ders filtreleri burada uygulanır |
+| FindingRouter (`router.py`) | Backend | Finding'leri JEV'e sorar, threshold'larla alert / LLM / explain kararını verir |
+| Assistant (`llm.py`) | Backend | LLM'i tool-calling loop ile çalıştırır (sohbet, triage, explain, digest planı) |
+| Toolbox (`agent.py`) | Backend | Tool tanımları ve çalıştırılması: read, site ve action tool'ları |
+| ActionGuard (`guard.py`) | Backend | Riskli action tool'dan önce JEV'e sorar, threshold'larla allow / deny verir |
+| Bot handlers (`bot.py`) | Backend | Komutlar, butonlar, sohbet; agent'ın istediği dosya ve bildirimleri gönderir |
+| Watchdog (`watchdog.py`) | Backend, ayrı thread | Event loop takılırsa process'i kapatır, Docker yeniden başlatır |
+| JEV | External service: TypeSafe API | State + sorulara olasılık döner, karar vermez |
+| LLM | External service: xAI Grok ya da DeepSeek API | Metin ve tool call üretir |
+| Telegram | External service: Telegram Bot API | Öğrenciyle tek kanal |
+| Pushover | External service: Pushover API | Alert'lerin telefona gitmesi |
 
-Bulgu kararındaki eşikler `.env`'den ayarlanır (`JEV_PUSH_HIGH`, `JEV_PUSH_LOW`, `JEV_EXPLAIN_MIN`). Kararların hepsi `/llmlog`'da olasılıklarıyla birlikte görünür.
+### Finding pipeline
 
-**Kesik çerçeveli bileşenler isteğe bağlıdır:** JEV, LLM ve Pushover anahtarı yoksa ya da `/ayarlar`'dan kapatılmışsa devre dışı kalır ve bot bunu söyler. Pushover kapalıysa uyarılar Telegram'a gelir.
+```mermaid
+flowchart TB
+    EK["e-Kampüs<br/>Toltek TCampus"]
 
-**Bulgu hattında ajanın eylem ve site araçları yoktur.** Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
+    subgraph backend["Backend: ekampus"]
+        SC["Scanner<br/>scan.py + browser.py, Playwright"]
+        DF["Diff<br/>detect.py"]
+        DB[("SQLite<br/>store.py")]
+        FR["FindingRouter<br/>router.py<br/>threshold kararı burada"]
+        AS["Assistant<br/>llm.py<br/>triage, explain"]
+        OB["Outbox flush<br/>engine.py, JobQueue 15 sn"]
+    end
+
+    subgraph external["External services"]
+        JEV["JEV<br/>TypeSafe API<br/>sadece olasılık döner"]
+        LLM["LLM<br/>xAI Grok / DeepSeek API"]
+        TG["Telegram Bot API"]
+        PO["Pushover API"]
+    end
+
+    EK -->|HTML, JSON| SC
+    SC --> DF
+    DF -->|items, events| DB
+    DF -->|findings| FR
+    FR -->|state + questions| JEV
+    JEV -->|probabilities| FR
+    FR -->|"push_now ≥ 0.80: alert"| DB
+    FR -->|"0.30 - 0.80 ya da explain ≥ 0.60"| AS
+    AS <-->|chat completions, read-only tool calls| LLM
+    AS -->|notify_owner alert, explanation| DB
+    DB -->|pending outbox| OB
+    OB -->|notifications| TG
+    OB -->|alerts| PO
+
+    classDef optional stroke-dasharray: 5 5
+    class JEV,LLM,PO,AS optional
+```
+
+Scanner belirli aralıklarla e-Kampüs'ü okur. Diff yeni ya da değişen her kaydı bir event yapar ve outbox'a yazar; outbox flush bunları Telegram'a gönderir. Yeni finding'ler ayrıca FindingRouter'a gider:
+- **`push_now` ≥ 0.80:** Backend alert'i kendisi outbox'a koyar, Pushover'a gider. Bu karar için LLM'e gidilmez.
+- **0.30 < `push_now` < 0.80:** Karar LLM'e bırakılır; LLM read-only tool'larla bağlama bakıp gerekirse `notify_owner` ile alert gönderir.
+- **`needs_explanation` ≥ 0.60:** LLM kısa bir açıklama yazar, asıl bildirimden sonra gelir.
+- **`push_now` ≤ 0.30:** Sadece normal bildirim gelir.
+
+### Chat pipeline
+
+```mermaid
+flowchart TB
+    U((Öğrenci))
+
+    subgraph backend["Backend: ekampus"]
+        BOT["Bot handlers<br/>bot.py, long polling"]
+        AS["Assistant<br/>llm.py, tool-calling loop"]
+        TB["Toolbox<br/>agent.py<br/>read, site, action tools"]
+        GD["ActionGuard<br/>guard.py<br/>threshold kararı burada"]
+        DB[("SQLite<br/>store.py")]
+    end
+
+    subgraph external["External services"]
+        TG["Telegram Bot API"]
+        LLM["LLM<br/>xAI Grok / DeepSeek API"]
+        JEV["JEV<br/>TypeSafe API<br/>sadece olasılık döner"]
+        EK["e-Kampüs"]
+    end
+
+    U <--> TG
+    TG -->|message update| BOT
+    BOT -->|serbest metin, JEV'e gitmez| AS
+    AS <-->|messages + tool specs / tool calls| LLM
+    AS -->|tool call| TB
+    TB -->|read tools, read-only SQL| DB
+    TB -->|"site tools: ödev sayfası, PDF"| EK
+    TB -->|risky action tool| GD
+    GD <-->|state + questions / probabilities| JEV
+    GD -->|allow ya da deny| TB
+    TB -->|action tools| DB
+    AS -->|reply + Yapılanlar + side effects| BOT
+    BOT -->|sendMessage, sendDocument| TG
+
+    classDef optional stroke-dasharray: 5 5
+    class AS,TB,GD,LLM,JEV optional
+```
+
+Sohbete yazılan mesaj JEV'e gitmez; bot handler doğrudan Assistant'a verir. Assistant LLM'i tool-calling loop ile çalıştırır, LLM'in istediği tool'ları Toolbox yürütür:
+- **Read tools:** Kayıtlar, ajanda, reminder takvimi, botun durumu, read-only SQL.
+- **Site tools:** Ödev sayfası, PDF okuma.
+- **Action tools:** Sessiz mod, ayarlar, reminder'lar, hafıza, dosya ve bildirim gönderme.
+
+Risksiz action'lar hemen yapılır; riskli olanlar önce ActionGuard'dan geçer. Yapılan her action cevabın altında "Yapılanlar" olarak listelenir. Dosya gönderme gibi side effect'leri bot handler cevaptan sonra yapar.
+
+### JEV'in iki kullanımı
+
+| | Finding triage | Action guardrail |
+|---|---|---|
+| Çağıran (backend) | `router.py` FindingRouter | `guard.py` ActionGuard |
+| Ne zaman | Her yeni ya da değişen finding | Riskli bir action tool çalışmadan hemen önce |
+| JEV'e giden state | Finding metni ve backend'in hesapladığı gerçekler (kalan saat, teslim durumu, tarih öne mi alındı) | Öğrencinin mesajı, son birkaç mesaj, önerilen tool ve argümanları |
+| Sorular (noul) | `requires_submission`, `exam_related`, `schedule_change`, `action_required`, `needs_explanation`, `push_now` | `explicitly_requested`, `risky` |
+| Kararı veren | Backend: `push_now` ≥ 0.80 alert, 0.30-0.80 LLM, ≤ 0.30 yok; `needs_explanation` ≥ 0.60 explain | Backend: `explicitly_requested` ≥ 0.60 allow; değilse `risky` < 0.25 allow, aksi halde deny |
+| JEV kapalıysa | Finding'ler doğrudan LLM'e gider | Guardrail atlanır, action yapılır |
+| LLM kapalıysa | Kararsız finding'ler kaçmasın diye alert olur | Sohbet agent'ı da kapalıdır |
+
+Triage threshold'ları `.env`'den ayarlanır (`JEV_PUSH_HIGH`, `JEV_PUSH_LOW`, `JEV_EXPLAIN_MIN`). Bütün kararlar `/llmlog`'da olasılıklarıyla görünür.
+
+**Kesik çerçeveli bileşenler isteğe bağlıdır:** JEV, LLM ve Pushover anahtarı yoksa ya da `/ayarlar`'dan kapatılmışsa devre dışı kalır ve bot bunu söyler. Pushover kapalıysa alert'ler Telegram'a gelir.
+
+**Prompt injection:** Finding pipeline'ında LLM'e site ve action tool'ları verilmez. Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
 
 Yanlış alarm vermemek için algılama temkinli çalışır:
 - İlk kurulumda var olan kayıtlar bildirilmez.
@@ -120,7 +176,7 @@ Yanlış alarm vermemek için algılama temkinli çalışır:
 | Bot | python-telegram-bot 22 (asyncio, JobQueue) |
 | Veri | SQLite |
 | LLM | OpenAI uyumlu API: xAI Grok, DeepSeek |
-| Karar katmanı | TypeSafe JEV |
+| Finding triage, action guardrail | TypeSafe JEV |
 | Belge okuma | pypdf |
 | Uyarılar | Pushover (httpx) |
 | Çalıştırma | Docker, Docker Compose, Windows Görev Zamanlayıcı |
@@ -137,16 +193,16 @@ ekampus/
   parse.py       sayfa ayrıştırıcıları
   detect.py      önceki durumla karşılaştırma, olay üretimi
   reminders.py   teslim hatırlatma ve canlı ders kuralları
-  store.py       SQLite: kayıtlar, bildirim kuyruğu, sohbet geçmişi, hafıza, LLM kayıtları
+  store.py       SQLite: kayıtlar, outbox, sohbet geçmişi, hafıza, PDF cache, LLM log'ları
   engine.py      tarama zamanlaması, sağlık uyarıları, sessiz mod, bildirim gönderimi
-  jev.py         JEV istemcisi ve bulgunun karar katmanına giden hali
-  router.py      bulgu yönlendirici: JEV, LLM ve uyarı arasında karar
-  agent.py       ajanın araç kutusu: okuma, site ve eylem araçları
-  guard.py       riskli eylemlerden önce JEV kontrolü
+  jev.py         JEV client ve finding'in JEV'e giden state'i
+  router.py      FindingRouter: JEV olasılıklarına göre alert / LLM / explain
+  agent.py       Toolbox: agent'ın read, site ve action tool'ları
+  guard.py       ActionGuard: riskli action tool'dan önce JEV guardrail
   documents.py   PDF'den sayfa sayfa metin
-  llm.py         LLM asistanı: sohbet, bulgu değerlendirmesi, açıklama, sabah planı
+  llm.py         Assistant: sohbet, finding triage, explain, digest planı
   pushover.py    Pushover istemcisi
-  watchdog.py    takılma bekçisi
+  watchdog.py    watchdog thread: takılan process'i yeniden başlatır
   bot.py         Telegram komutları, butonlar, erişim kontrolü
   messages.py    mesaj biçimleri
   prefs.py       bildirim tercihleri
@@ -166,7 +222,7 @@ docs/            site haritası
 - Sunucuda çalıştırmak için: Docker
 
 **İsteğe bağlı (anahtarı yoksa o özellik çalışmaz, bot da bunu söyler):**
-- xAI ya da DeepSeek API anahtarı: LLM ajanı
+- xAI ya da DeepSeek API anahtarı: LLM agent
 - TypeSafe API anahtarı: JEV
 - Pushover uygulama token'ı ve kullanıcı anahtarı: telefona uyarı
 
@@ -189,7 +245,7 @@ Bot bundan sonra yalnızca bu hesapla konuşur.
 
 **Pushover:** Sistem uyarılarını Pushover'a almak için pushover.net'te bir uygulama oluştur; uygulama token'ını ve kullanıcı anahtarını `.env`'e yaz. `doctor` anahtarları doğrular, `test-notify --olay pushover` deneme gönderir.
 
-**JEV:** JEV'i denemek için `TYPESAFE_API_KEY`'i yaz. `jev-test` örnek bulgularda JEV'in olasılıklarını ve yönlendiricinin kararını gösterir; hiçbir şey göndermez.
+**JEV:** JEV'i denemek için `TYPESAFE_API_KEY`'i yaz. `jev-test` örnek finding'lerde JEV'in olasılıklarını ve FindingRouter'ın kararını gösterir; hiçbir şey göndermez.
 
 Windows'ta oturum açılınca arka planda başlaması için:
 
@@ -214,8 +270,8 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 |---|---|---|
 | `EKAMPUS_USERNAME`, `EKAMPUS_PASSWORD` | ÖBS kullanıcı adı ve şifresi | |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID` | Bot token'ı ve botun konuşacağı tek hesap | |
-| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | `xai` ya da `deepseek`, API anahtarı, model; anahtar yoksa LLM ajanı çalışmaz | `deepseek`, boş, otomatik |
-| `TYPESAFE_API_KEY` | JEV karar katmanı; boşsa bulgulara LLM karar verir | boş |
+| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | `xai` ya da `deepseek`, API anahtarı, model; anahtar yoksa LLM agent çalışmaz | `deepseek`, boş, otomatik |
+| `TYPESAFE_API_KEY` | JEV (finding triage ve action guardrail); boşsa finding'lere LLM karar verir, guardrail atlanır | boş |
 | `PUSHOVER_APP_TOKEN`, `PUSHOVER_USER_KEY` | Uyarılar için Pushover; boşsa uyarılar Telegram'a gider | boş |
 | `LLM_DAILY_TOKEN_BUDGET` | Günlük token sınırı | 200000 |
 | `LLM_HISTORY_MESSAGES` | Her soruda modele tekrar gönderilen son mesaj sayısı | 20 |
@@ -241,7 +297,7 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `/hafiza` | LLM'in senin hakkında hatırladıkları; tek tek ya da hepsini silme |
 | `/hatirlatmalar` | Kurduğun saatli hatırlatmalar ve iptal |
 | `/sessiz 2s` | Acil olmayan bildirimleri belirli bir süre beklet (`30dk`, `1g`, `kapat`) |
-| `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş, kuyruk ve özelliklerin durumu |
+| `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş, outbox ve özelliklerin durumu |
 | `/llmlog`, `/unut` | LLM'in son cevapta baktığı veriler ve yaptığı eylemler; sohbet geçmişini silme (hafıza kalır) |
 | `/girisdene` | Reddedilen bir girişten sonra login kilidini kaldırıp tekrar dene |
 
@@ -266,13 +322,13 @@ LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştı
 - **Gizli bilgiler:** Şifre, token ve API anahtarı sadece `.env` dosyasında durur, repoya girmez.
 - **LLM ve JEV:**
   - İkisi de yalnızca ödev, not, duyuru ve takvim gibi ders verilerini görür; kimlik bilgilerine ve anahtarlara erişimleri yoktur. Bu veriler kullanılan LLM sağlayıcısına ve TypeSafe'e gider.
-  - Uyarı göndermesi soyut bir araçla olur: model kanalın nasıl çalıştığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
-- **Ajanın eylemleri:**
-  - Ajan sadece sohbette, senin mesajına cevap verirken eylem yapar; bulguları değerlendirirken eylem ve site araçları ona hiç verilmez.
-  - Riskli eylemlerden önce JEV'e "öğrenci bunu açıkça istedi mi" diye sorulur; istenmemiş riskli eylem durdurulur.
-  - Zamanlar ve sınırlar kodda doğrulanır.
-  - Veritabanı sorguları salt okunurdur: SQLite yetkilendiricisi yazmayı reddeder, uzun sorgu kesilir.
-  - Her değişiklik cevabın altında listelenir. `/llmlog`'da eylemler "[eylem]", JEV kontrolleri de "JEV eylem kontrolü" olarak görünür.
+  - Alert göndermesi soyut bir tool (`notify_owner`) ile olur: model kanalın nasıl çalıştığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
+- **Agent action'ları:**
+  - Agent sadece sohbette, senin mesajına cevap verirken action yapar; finding triage'da site ve action tool'ları ona hiç verilmez.
+  - Riskli action'lardan önce JEV guardrail'e "öğrenci bunu açıkça istedi mi" diye sorulur; istenmemiş riskli action deny edilir.
+  - Zamanlar ve sınırlar backend'de doğrulanır.
+  - SQL sorguları read-only'dir: SQLite authorizer yazmayı reddeder, uzun sorgu kesilir.
+  - Her değişiklik cevabın altında listelenir. `/llmlog`'da action'lar "[eylem]", guardrail kontrolleri de "JEV eylem kontrolü" kaydı olarak görünür.
 
 ## Geliştirme
 
@@ -280,8 +336,8 @@ LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştı
 .venv/Scripts/python -m pytest                      # testler
 .venv/Scripts/python -m ekampus doctor              # ortam ve bağlantı kontrolü
 .venv/Scripts/python -m ekampus check --dry-run     # tek tarama, durumu değiştirmeden
-.venv/Scripts/python -m ekampus test-notify --olay odev   # örnek bildirimi botun hattından geçir
-.venv/Scripts/python -m ekampus jev-test            # örnek bulgularda JEV kararları
+.venv/Scripts/python -m ekampus test-notify --olay odev   # örnek bildirimi botun gönderim yolundan geçir
+.venv/Scripts/python -m ekampus jev-test            # örnek finding'lerde JEV kararları
 ```
 
 Sitenin yapısı, kullanılan adresler ve dikkat edilmesi gereken noktalar [docs/site-map.md](docs/site-map.md) dosyasında.
