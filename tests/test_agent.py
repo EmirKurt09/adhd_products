@@ -14,7 +14,7 @@ from ekampus.agent import Toolbox, Turn, parse_local
 from ekampus.detect import diff
 from ekampus.engine import Engine, ScanOutcome
 from ekampus.llm import Assistant
-from ekampus.models import Item, Scan
+from ekampus.models import Event, Item, Scan
 from ekampus.store import Store
 
 
@@ -133,21 +133,45 @@ def test_send_file_queues_for_bot(box):
     turn = Turn()
     for i in range(4):
         asyncio.run(box.call("send_file", {"uid": f"1:{i}"}, turn))
-    assert turn.files == ["1:0", "1:1", "1:2"]  # bir seferde en fazla 3
+    assert turn.files == [f"1:{i}" for i in range(4)]
     assert "hata" in asyncio.run(box.call("send_file", {"uid": "yok"}, turn))
 
 
-def test_refresh_now_has_cooldown(box):
+def test_refresh_now_lists_what_is_new_and_has_cooldown(box, settings):
     scans = []
+    due = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    found = [Event("new", "new:assignment:9", {"kind": "assignment", "uid": "9", "title": "Homework 5",
+                                               "course": "Ağlar", "due_at": due}),
+             Event("new", "new:grade:x", {"kind": "grade", "uid": "x", "title": "Vize", "course": "Ağlar",
+                                          "extra": {"value": "85"}})]
 
     async def fake_scan(reason):
         scans.append(reason)
-        return ScanOutcome(True, events=2, duration_s=12)
+        return ScanOutcome(True, events=2, duration_s=12, findings=found)
 
     box.engine.run_scan = fake_scan
     result, turn = call(box, "refresh_now")
-    assert result["yeni_olay"] == 2 and turn.flush and turn.actions == ["Site kontrol edildi: 2 yeni olay"]
+    assert [f["başlık"] for f in result["yeniler"]] == ["Homework 5", "Vize"]
+    assert result["yeniler"][0]["tarih"].endswith("3 gün kaldı") or "kaldı" in result["yeniler"][0]["tarih"]
+    assert result["yeniler"][1]["not"] == "85" and result["yeniler"][0]["olay"] == "yeni"
+    assert turn.flush and turn.actions == ["Site kontrol edildi: 2 yeni ya da değişen kayıt"]
     assert "hata" in call(box, "refresh_now")[0] and scans == ["asistan"]
+
+
+def test_retry_login_resets_guard_and_scans(box, settings):
+    from ekampus.browser import AuthGuard
+
+    async def fake_scan(reason):
+        return ScanOutcome(True, findings=[])
+
+    box.engine.run_scan = fake_scan
+    guard = AuthGuard(settings.auth_guard_path, settings.username, settings.password)
+    guard.block("şifre yanlış")
+    assert box.run_read("bot_state", {})["giriş"] == "kilitli: şifre yanlış"
+    result, turn = call(box, "retry_login")
+    assert result["durum"] == "tamam" and result["kilit_vardı"] is True
+    assert turn.actions == ["Giriş kilidi kaldırıldı, tekrar denendi", "Site kontrol edildi: yeni bir şey yok"]
+    assert not guard.status().get("blocked")
 
 
 # ── Sohbet döngüsü: model aracı çağırır, kod "Yapılanlar"ı yazar ─────────────

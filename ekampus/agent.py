@@ -20,6 +20,7 @@ from typing import Any, Callable, Protocol
 from . import features
 from . import messages as M
 from . import prefs as PR
+from .browser import AuthGuard
 from .config import Settings
 from .messages import fmt_dt, remaining
 from .store import MemoryFull, Store
@@ -27,7 +28,7 @@ from .store import MemoryFull, Store
 QUIET_MAX = timedelta(days=30)
 NOTE_MAX_AHEAD = timedelta(days=365)
 NOTES_MAX = 30
-FILES_PER_TURN = 3
+FILES_PER_TURN = 10
 REFRESH_COOLDOWN = timedelta(seconds=60)
 TIME_FORMAT = "YYYY-MM-DD HH:MM (İstanbul saati)"
 
@@ -47,6 +48,9 @@ def when(dt: datetime, tz, now: datetime) -> str:
     """Modele ve kullanıcıya geri söylenen normalize zaman: '10 Eki Cum 18:00 · 1 gün 6 sa kaldı'."""
     return f"{fmt_dt(dt, tz, now)} · {remaining(dt, now)}"
 
+
+EVENT_LABEL = {"new": "yeni", "due_changed": "tarih değişti", "changed": "güncellendi",
+               "scope_added": "yeni ders izlemeye alındı"}
 
 # Ajanın açıp kapatabildiği bildirim ayarları
 SETTING_KEYS = [key for key, _ in PR.CATEGORIES] + ["night"]
@@ -245,6 +249,8 @@ class Toolbox:
             "hafıza_not_sayısı": len(self.store.memory_list()),
             "son_kontrol": json.loads(self.store.get("last_scan", "{}")),
         }
+        guard = AuthGuard(self.s.auth_guard_path, self.s.username, self.s.password).status()
+        state["giriş"] = f"kilitli: {guard.get('reason') or ''}" if guard.get("blocked") else "açık"
         if self.engine is not None:
             muted = self.engine.muted_until()
             if muted and muted > now:
@@ -305,11 +311,16 @@ class Toolbox:
                  self._remind_me, writes=True),
             Tool("cancel_reminder", "Kurulmuş bir hatırlatmayı iptal eder; id list_reminders'tan.",
                  params({"id": {"type": "integer"}}, ["id"]), self._cancel_reminder, writes=True),
-            Tool("send_file", "Bir ders materyalini dosya olarak sohbete gönderir; uid list_files'tan. Materyal sitede "
-                              "açıldığı için 'görüldü' sayılır.",
+            Tool("send_file", "Bir ders materyalini dosya olarak sohbete gönderir; uid list_files'tan. Birden çok "
+                              "dosya için her biri ayrı çağrı (bir cevapta en fazla 10). Materyal sitede açıldığı için "
+                              "'görüldü' sayılır.",
                  params({"uid": {"type": "string"}}, ["uid"]), self._send_file, writes=True),
-            Tool("refresh_now", "e-Kampüs'ü hemen kontrol eder (yarım dakika kadar sürebilir); yeni bir şey varsa "
-                                "bildirim olarak gelir.", params(), self._refresh_now, writes=True),
+            Tool("refresh_now", "e-Kampüs'ü hemen kontrol eder (\"sayfayı yenile\", \"yeni bir şey var mı bak\"); yarım "
+                                "dakika kadar sürebilir. Yeni gelen ya da değişen her şeyi döndürür; öğrenciye tek tek "
+                                "söyle. Bildirimleri de ayrıca gelir.", params(), self._refresh_now, writes=True),
+            Tool("retry_login", "e-Kampüs girişi reddedildiği için kilitlendiyse kilidi kaldırıp bir kez daha dener. "
+                                "Sadece bot_state ya da status girişin kilitli olduğunu söylüyorsa kullan.",
+                 params(), self._retry_login, writes=True),
         ]
 
     def _need_engine(self):
@@ -436,5 +447,32 @@ class Toolbox:
         if not outcome.ok:
             turn.actions.append("Site kontrol edilemedi")
             return {"durum": "başarısız", "hata": outcome.error[:300]}
-        turn.actions.append(f"Site kontrol edildi: {outcome.events} yeni olay")
-        return {"durum": "tamam", "yeni_olay": outcome.events, "süre_sn": round(outcome.duration_s)}
+        found = [self._event_brief(e, now) for e in outcome.findings[:20]]
+        turn.actions.append(f"Site kontrol edildi: {len(found)} yeni ya da değişen kayıt" if found
+                            else "Site kontrol edildi: yeni bir şey yok")
+        return {"durum": "tamam", "yeniler": found, "süre_sn": round(outcome.duration_s)}
+
+    def _event_brief(self, event, now: datetime) -> dict:
+        data = event.data
+        out = {"olay": EVENT_LABEL.get(event.type, event.type), "tür": M.KIND_LABEL.get(data.get("kind", ""), data.get("kind")),
+               "başlık": data.get("title") or data.get("course"), "ders": data.get("course")}
+        if data.get("uid"):
+            out["uid"] = data["uid"]
+        due = M.parse_dt(data.get("due_at"))
+        if due:
+            out["tarih"] = when(due, self.s.tz, now)
+        if event.type == "due_changed" and data.get("old_due_at"):
+            out["eski_tarih"] = fmt_dt(M.parse_dt(data["old_due_at"]), self.s.tz, now)
+        if (data.get("extra") or {}).get("value"):
+            out["not"] = data["extra"]["value"]
+        return out
+
+    async def _retry_login(self, args: dict, turn: Turn) -> dict:
+        engine = self._need_engine()
+        guard = AuthGuard(self.s.auth_guard_path, self.s.username, self.s.password)
+        was_blocked = bool(guard.status().get("blocked"))
+        guard.reset()
+        self.store.set("agent_refresh_at", "")  # bekleme süresine takılmasın
+        turn.actions.append("Giriş kilidi kaldırıldı, tekrar denendi" if was_blocked else "Giriş tekrar denendi")
+        result = await self._refresh_now(args, turn)
+        return {"kilit_vardı": was_blocked, **result}
