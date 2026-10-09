@@ -53,6 +53,38 @@ def toggle(store: Store, key: str) -> dict:
     return prefs
 
 
+def _name_list(store: Store, key: str) -> list[str]:
+    try:
+        return [str(x) for x in json.loads(store.get(key, "[]"))]
+    except json.JSONDecodeError:
+        return []
+
+
+def muted_courses(store: Store) -> list[str]:
+    """Bildirimi tamamen kapatılmış dersler (ders adı, sitedeki yazılışıyla)."""
+    return _name_list(store, "muted_courses")
+
+
+def set_course_muted(store: Store, course: str, muted: bool) -> list[str]:
+    names = [c for c in muted_courses(store) if c != course] + ([course] if muted else [])
+    store.set("muted_courses", json.dumps(names, ensure_ascii=False))
+    return names
+
+
+def course_muted(store: Store, course: str | None) -> bool:
+    return bool(course) and course.casefold() in {c.casefold() for c in muted_courses(store)}
+
+
+def muted_assignment_reminders(store: Store) -> set[str]:
+    """Otomatik teslim hatırlatması susturulmuş ödevlerin uid'leri."""
+    return set(_name_list(store, "muted_reminders"))
+
+
+def set_assignment_reminders_muted(store: Store, uid: str, muted: bool) -> None:
+    uids = (muted_assignment_reminders(store) | {uid}) if muted else (muted_assignment_reminders(store) - {uid})
+    store.set("muted_reminders", json.dumps(sorted(uids)))
+
+
 def set_value(store: Store, key: str, value: bool) -> dict:
     """Aç/kapa ayarını doğrudan belirler (ajan "duyuruları kapat" dediğinde)."""
     prefs = load(store)

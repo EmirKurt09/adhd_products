@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import prefs as PR
 from .config import Settings
 from .jev import JevDecision, build_state
 from .messages import fmt_dt, parse_dt, remaining
@@ -71,6 +72,10 @@ class FindingRouter:
         return self.assistant is not None and self.engine.feature_on("llm")
 
     async def route(self, findings: list[Event]) -> None:
+        # Sessize alınmış derslerin bulguları ne JEV'e ne LLM'e gider (bildirimleri de kuyrukta susturulur)
+        findings = [e for e in findings if not PR.course_muted(self.engine.store, e.data.get("course"))]
+        if not findings:
+            return
         jev_on = self.jev is not None and self.engine.feature_on("jev")
         if not jev_on:
             if self._llm_on():

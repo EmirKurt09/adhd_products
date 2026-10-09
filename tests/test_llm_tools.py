@@ -195,6 +195,6 @@ def test_bot_state_and_recent_notifications(settings):
     assert state["sessiz_mod"]["seviye"] == "tam sessiz" and state["sessiz_mod"]["kalan"].startswith("2 sa")
     assert state["bildirim_türleri"]["Duyurular"] == "açık"
     assert state["kişisel_hatırlatma_sayısı"] == 1 and state["hafıza_not_sayısı"] == 1
-    assert box.run_read("recent_notifications", {})[0] == {"zaman": M.fmt_dt(now, settings.tz), "tür": "Yeni duyuru",
+    assert box.run_read("recent_notifications", {})[0] == {"id": 2, "zaman": M.fmt_dt(now, settings.tz), "tür": "Yeni duyuru",
                                                             "başlık": "Vize yeri"}
     assert box.run_read("list_reminders", {})[0]["metin"] == "raporu yükle"

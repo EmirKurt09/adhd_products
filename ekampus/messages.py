@@ -441,6 +441,9 @@ def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, st
                  else "acil olanlar yine gelir")
         lines.append(f"Sessiz: {fmt_dt(muted, tz, now)} kadar ({level})")
     lines.append(f"Gece modu ({night}): {on_off(prefs.get('night'))}")
+    muted_courses = status.get("muted_courses") or []
+    if muted_courses:
+        lines.append("Bildirimi kapalı dersler: " + escape(", ".join(muted_courses)))
     lines.append("\nAyarı değiştirmek için butona dokun.")
 
     toggles = [_btn(f"{label}: {on_off(prefs.get(key))}", f"pref:{key}") for key, label in categories]
@@ -452,6 +455,8 @@ def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, st
     else:
         buttons.append([_btn("Sessiz 1 sa", "mute:1"), _btn("Sessiz 4 sa", "mute:4"),
                         _btn("Sabaha kadar sessiz", "mute:morning")])
+    for i, course in enumerate(muted_courses[:5]):
+        buttons.append([_btn(f"Bildirimleri aç: {clip(course, 40)}", f"cm:{i}")])
     buttons.append([_btn("Son bildirimler", "am:hist"), _btn("Yenile", "am:show")])
     return Message("\n".join(lines), buttons)
 

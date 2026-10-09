@@ -401,6 +401,7 @@ def manager_message(c: Ctx) -> M.Message:
         "parse_problems": sorted(json.loads(c.store.get("parse_streaks", "{}"))),
         "pending": stats["pending"], "sent_24h": c.store.sent_since(now - timedelta(hours=24)),
         "muted_until": c.engine.muted_until(), "mute_full": c.engine.mute_full(),
+        "muted_courses": PR.muted_courses(c.store),
         "alert_channel": "Pushover" if c.s.pushover_enabled else "Telegram (Pushover ayarlı değil)",
     }
     night = f"{c.s.night_start:%H:%M}–{c.s.night_end:%H:%M}"
@@ -535,6 +536,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await query.answer()
         await _edit(query, M.memory_view(c.store.memory_list(), confirm_clear=sub == "clear"))
+    elif action == "cm":  # sessize alınmış dersin bildirimlerini geri aç
+        courses = PR.muted_courses(c.store)
+        index = int(arg) if arg.isdigit() else -1
+        if 0 <= index < len(courses):
+            PR.set_course_muted(c.store, courses[index], False)
+            await query.answer(f"{courses[index]}: bildirimler açık")
+        else:
+            await query.answer()
+        await _edit(query, manager_message(c))
     elif action == "rem":
         sub, _, note_id = arg.partition(":")
         if sub == "del" and note_id.isdigit():

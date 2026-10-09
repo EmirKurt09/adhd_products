@@ -301,3 +301,78 @@ def test_upcoming_reminders_merge_automatic_and_personal(box, settings):
     assert kinds == ["kişisel hatırlatma", "teslim hatırlatması (24 saat kala)", "teslim hatırlatması (3 saat kala)"]
     asyncio.run(box.call("mark_assignment", {"uid": "7", "done": True}, Turn()))
     assert [u["tür"] for u in box.run_read("upcoming_reminders", {})] == ["kişisel hatırlatma"]
+
+
+# ── Ders ve ödev bazında bildirim, erteleme ───────────────────────────────────
+
+def flush_texts(engine, now=None) -> list[str]:
+    sent: list[str] = []
+
+    async def send(message, ctx):
+        sent.append(message.text)
+
+    asyncio.run(engine.flush(send, now or datetime.now(timezone.utc)))
+    return sent
+
+
+def test_mute_course_silences_everything_from_it(box):
+    result, turn = call(box, "mute_course", {"course": "ağ", "muted": True})
+    assert result["ders"] == "Ağlar" and turn.actions == ["Ağlar: bildirimler kapatıldı"]
+    now = datetime.now(timezone.utc)
+    box.store.enqueue(Event("new", "new:announcement:a", {"kind": "announcement", "uid": "a", "title": "Ağ duyurusu",
+                                                          "course": "Ağlar"}), now)
+    box.store.enqueue(Event("new", "new:announcement:b", {"kind": "announcement", "uid": "b", "title": "Başka",
+                                                          "course": "Fizik"}), now)
+    sent = flush_texts(box.engine)
+    assert any("Başka" in t for t in sent) and not any("Ağ duyurusu" in t for t in sent)
+    assert box.run_read("upcoming_reminders", {}) == []  # Ağlar ödevinin hatırlatmaları da yok
+    assert "hata" in call(box, "mute_course", {"course": "kimya", "muted": True})[0]
+    _, turn = call(box, "mute_course", {"course": "Ağlar", "muted": False})
+    assert PR.muted_courses(box.store) == [] and turn.actions == ["Ağlar: bildirimler açıldı"]
+
+
+def test_muted_course_findings_skip_jev_and_llm(box, settings):
+    from ekampus.router import FindingRouter
+
+    asked = []
+
+    class Jev:
+        async def ask(self, state):
+            asked.append(state)
+
+    PR.set_course_muted(box.store, "Ağlar", True)
+    router = FindingRouter(replace(settings, typesafe_api_key="k"), box.engine, None, Jev())
+    asyncio.run(router.route([Event("new", "new:assignment:9", {"kind": "assignment", "uid": "9", "title": "x",
+                                                                 "course": "Ağlar"})]))
+    assert asked == []
+
+
+def test_remind_before_due_and_mute_assignment_reminders(box):
+    result, turn = call(box, "remind_before_due", {"uid": "7", "hours_before": 0.5})
+    assert result["durum"] == "tamam" and turn.actions[0].endswith("Lab Raporu (30 dk kala)")
+    note = box.store.notes_pending()[0]
+    due = box.store.item("assignment", "7")["due"]
+    assert M.parse_dt(note["at"]) == due - timedelta(minutes=30) and "teslimine 30 dk kaldı" in note["text"]
+    assert "hata" in call(box, "remind_before_due", {"uid": "7", "hours_before": 100})[0]  # zaman geçmiş
+
+    _, turn = call(box, "mute_assignment_reminders", {"uid": "7", "muted": True})
+    assert turn.actions == ["“Lab Raporu” teslim hatırlatmaları: susturuldu"]
+    assert box.engine.plan_reminders(due - timedelta(hours=2)) == 0  # 3 saat eşiği geçti ama susturuldu
+    assert [u["tür"] for u in box.run_read("upcoming_reminders", {})] == ["kişisel hatırlatma"]
+
+
+def test_snooze_last_and_scheduled(box):
+    now = datetime.now(timezone.utc)
+    note_id, _ = box.engine.schedule_note("su iç", now + timedelta(hours=1), now)
+    _, turn = call(box, "snooze", {"minutes": 30, "id": note_id})
+    assert M.parse_dt(box.store.notes_pending()[0]["at"]) > now + timedelta(hours=1, minutes=29)
+    box.store.cancel_note(note_id)
+
+    box.store.enqueue(Event("reminder", "reminder:3h:7", {"kind": "assignment", "uid": "7", "title": "Lab Raporu",
+                                                           "course": "Ağlar", "hours": 3,
+                                                           "due_at": (now + timedelta(hours=3)).isoformat()}), now)
+    box.store.mark_sent(box.store.outbox_by_key("reminder:3h:7")["id"], now)
+    result, turn = call(box, "snooze", {"minutes": 60})
+    assert result["metin"].startswith("Teslim: Lab Raporu (Ağlar)") and turn.actions[0].startswith("Ertelendi:")
+    assert len(box.store.notes_pending()) == 1
+    assert "hata" in call(box, "snooze", {"minutes": 1})[0]

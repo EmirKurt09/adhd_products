@@ -274,6 +274,8 @@ class Toolbox:
             "hafıza_not_sayısı": len(self.store.memory_list()),
             "son_kontrol": json.loads(self.store.get("last_scan", "{}")),
         }
+        state["sessizdeki_dersler"] = PR.muted_courses(self.store)
+        state["hatırlatması_susturulan_ödevler"] = sorted(PR.muted_assignment_reminders(self.store))
         guard = AuthGuard(self.s.auth_guard_path, self.s.username, self.s.password).status()
         state["giriş"] = f"kilitli: {guard.get('reason') or ''}" if guard.get("blocked") else "açık"
         if self.engine is not None:
@@ -291,7 +293,8 @@ class Toolbox:
         for row in self.store.recent_sent(min(int(args.get("limit", 15)), 30)):
             label, title = M.history_entry(row)
             sent = M.parse_dt(row["sent_at"])
-            out.append({"zaman": fmt_dt(sent, self.s.tz) if sent else "?", "tür": label, "başlık": title})
+            out.append({"id": row["id"], "zaman": fmt_dt(sent, self.s.tz) if sent else "?", "tür": label,
+                        "başlık": title})
         return out
 
     def _list_reminders(self, args: dict, turn: Turn) -> list[dict]:
@@ -303,9 +306,11 @@ class Toolbox:
         now = datetime.now(timezone.utc)
         end = now + timedelta(days=int(args.get("days", 7)))
         planned: list[tuple[datetime, dict]] = []
+        silenced = PR.muted_assignment_reminders(self.store)
         for due in self.store.due_items():
             if due.kind == "assignment":
-                if due.submitted or due.done_manual or due.due_at <= now:
+                if due.submitted or due.done_manual or due.due_at <= now or due.uid in silenced \
+                        or PR.course_muted(self.store, due.course):
                     continue
                 for hours in self.s.reminder_hours:
                     at = due.due_at - timedelta(hours=hours)
@@ -444,6 +449,23 @@ class Toolbox:
                  self._remind_me, writes=True),
             Tool("cancel_reminder", "Kurulmuş bir hatırlatmayı iptal eder; id list_reminders'tan.",
                  params({"id": {"type": "integer"}}, ["id"]), self._cancel_reminder, writes=True),
+            Tool("snooze", "Hatırlatmayı erteler. id verilirse kurulu kişisel hatırlatmayı ileri alır; verilmezse az önce "
+                           "gelen son hatırlatmayı (teslim, canlı ders ya da kişisel) minutes dakika sonra tekrar gönderir.",
+                 params({"minutes": {"type": "integer", "minimum": 5, "maximum": 10080}, "id": {"type": "integer"}},
+                        ["minutes"]), self._snooze, writes=True),
+            Tool("remind_before_due", "Bir ödevin teslimine belirli bir süre kala ek hatırlatma kurar (\"bu ödev için 1 "
+                                      "saat kala da hatırlat\"). Zamanı kod hesaplar; hours_before ondalık olabilir "
+                                      "(0.5 = 30 dk).",
+                 params({"uid": {"type": "string"}, "hours_before": {"type": "number", "minimum": 0.1, "maximum": 720}},
+                        ["uid", "hours_before"]), self._remind_before_due, writes=True),
+            Tool("mute_assignment_reminders", "Bir ödevin otomatik teslim hatırlatmalarını susturur ya da geri açar "
+                                              "(ödev teslim edilmiş sayılmaz).",
+                 params({"uid": {"type": "string"}, "muted": {"type": "boolean"}}, ["uid", "muted"]),
+                 self._mute_assignment_reminders, writes=True),
+            Tool("mute_course", "Bir dersin bütün bildirimlerini (ödev, duyuru, materyal, not, hatırlatma) kapatır ya da "
+                                "geri açar. course dersin adı ya da adının bir parçası.",
+                 params({"course": {"type": "string"}, "muted": {"type": "boolean"}}, ["course", "muted"]),
+                 self._mute_course, writes=True),
             Tool("send_file", "Bir ders materyalini dosya olarak sohbete gönderir; uid list_files'tan. Birden çok "
                               "dosya için her biri ayrı çağrı (bir cevapta en fazla 10). Materyal sitede açıldığı için "
                               "'görüldü' sayılır.",
@@ -558,6 +580,82 @@ class Toolbox:
             return {"hata": "bu numarada kurulu hatırlatma yok"}
         turn.actions.append(f"Hatırlatma iptal edildi: {note['text']}")
         return {"durum": "tamam"}
+
+    def _snooze(self, args: dict, turn: Turn) -> dict:
+        engine = self._need_engine()
+        now = datetime.now(timezone.utc)
+        minutes = int(args["minutes"])
+        if not 5 <= minutes <= 7 * 24 * 60:
+            return {"hata": "erteleme 5 dakika ile 7 gün arasında olmalı"}
+        at = now + timedelta(minutes=minutes)
+        if args.get("id") is not None:  # kurulu hatırlatma: kendi zamanından itibaren ileri alınır
+            note = next((n for n in self.store.notes_pending() if n["id"] == int(args["id"])), None)
+            if note is None:
+                return {"hata": "bu numarada kurulu hatırlatma yok"}
+            at = max(M.parse_dt(note["at"]), now) + timedelta(minutes=minutes)
+            self.store.reschedule_note(note["id"], at)
+            text = note["text"]
+        else:  # az önce gelen hatırlatma: şimdiden itibaren
+            last = next((r for r in self.store.recent_sent(20) if r["type"] in ("note", "reminder", "live_soon")
+                         and now - M.parse_dt(r["sent_at"]) < timedelta(hours=12)), None)
+            if last is None:
+                return {"hata": "son 12 saatte gelmiş bir hatırlatma yok"}
+            payload = json.loads(last["payload"])
+            if last["type"] == "note":
+                text = payload["text"]
+            else:
+                due = M.parse_dt(payload.get("due_at"))
+                label = "Canlı ders" if last["type"] == "live_soon" else "Teslim"
+                text = f"{label}: {payload.get('title')} ({payload.get('course')}) · {when(due, self.s.tz, at)}"
+            engine.schedule_note(text, at, now)
+        turn.actions.append(f"Ertelendi: {text} → {fmt_dt(at, self.s.tz, now)}")
+        return {"durum": "tamam", "zaman": when(at, self.s.tz, now), "metin": text}
+
+    def _remind_before_due(self, args: dict, turn: Turn) -> dict:
+        engine = self._need_engine()
+        now = datetime.now(timezone.utc)
+        item = self.store.item("assignment", str(args["uid"]))
+        if not item or not item["due"]:
+            return {"hata": "ödev ya da teslim tarihi bulunamadı"}
+        hours = float(args["hours_before"])
+        at = item["due"] - timedelta(hours=hours)
+        if at <= now:
+            return {"hata": f"teslime zaten {remaining(item['due'], now)}; bu zaman geçti"}
+        span = f"{int(hours * 60)} dk" if hours < 1 else f"{hours:g} saat"
+        text = f"{item['title']} ({item['course']}) teslimine {span} kaldı · {fmt_dt(item['due'], self.s.tz, at)}"
+        note_id, new = engine.schedule_note(text, at, now)
+        if new:
+            turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {item['title']} ({span} kala)")
+        return {"durum": "tamam", "id": note_id, "zaman": when(at, self.s.tz, now)}
+
+    def _mute_assignment_reminders(self, args: dict, turn: Turn) -> dict:
+        item = self.store.item("assignment", str(args["uid"]))
+        if not item:
+            return {"hata": "ödev bulunamadı"}
+        muted = bool(args["muted"])
+        PR.set_assignment_reminders_muted(self.store, item["uid"], muted)
+        if muted:
+            self.store.mute_pending("reminder", item["uid"])
+        turn.actions.append(f"“{item['title']}” teslim hatırlatmaları: {'susturuldu' if muted else 'açıldı'}")
+        return {"durum": "tamam"}
+
+    def _known_courses(self) -> list[str]:
+        names = {r["course"] for r in self.store.db.execute("SELECT DISTINCT course FROM items WHERE course != ''")}
+        names |= {c.get("name") for c in json.loads(self.store.get("courses", "[]")) if c.get("name")}
+        return sorted(names)
+
+    def _mute_course(self, args: dict, turn: Turn) -> dict:
+        needle = str(args["course"]).casefold().strip()
+        muted = bool(args["muted"])
+        pool = self._known_courses() if muted else PR.muted_courses(self.store)
+        exact = [c for c in pool if c.casefold() == needle]
+        matches = exact or [c for c in pool if needle and needle in c.casefold()]
+        if len(matches) != 1:
+            return {"hata": "ders bulunamadı" if not matches else "birden çok ders eşleşti, hangisi?",
+                    "dersler": matches or pool}
+        PR.set_course_muted(self.store, matches[0], muted)
+        turn.actions.append(f"{matches[0]}: bildirimler {'kapatıldı' if muted else 'açıldı'}")
+        return {"durum": "tamam", "ders": matches[0], "sessizdeki_dersler": PR.muted_courses(self.store)}
 
     def _send_file(self, args: dict, turn: Turn) -> dict:
         item = self.store.item("file", str(args["uid"]))

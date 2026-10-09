@@ -333,7 +333,9 @@ class Engine:
 
     # ── Hatırlatmalar ─────────────────────────────────────────────────────
     def plan_reminders(self, now: datetime) -> int:
-        planned = plan_reminders(self.store.due_items(), self.s.reminder_hours, self.s.live_lesson_reminder_min, now)
+        silenced = PR.muted_assignment_reminders(self.store)  # "bu ödevin hatırlatmalarını sustur"
+        items = [d for d in self.store.due_items() if not (d.kind == "assignment" and d.uid in silenced)]
+        planned = plan_reminders(items, self.s.reminder_hours, self.s.live_lesson_reminder_min, now)
         return self.store.enqueue_planned(planned, now)
 
     # ── Outbox gönderimi ──────────────────────────────────────────────────
@@ -365,9 +367,11 @@ class Engine:
             return 0
         preferences = PR.load(self.store)
         enabled = []
-        for row in rows:  # kapalı kategoriler kuyrukta birikmesin: 'muted' olarak kapat
-            category = PR.category_of(row["type"], json.loads(row["payload"]))
-            if category is not None and not preferences.get(category, True):
+        for row in rows:  # kapalı kategoriler ve sessize alınmış dersler kuyrukta birikmesin: 'muted' olarak kapat
+            payload = json.loads(row["payload"])
+            category = PR.category_of(row["type"], payload)
+            course_off = category is not None and PR.course_muted(self.store, payload.get("course"))
+            if (category is not None and not preferences.get(category, True)) or course_off:
                 self.store.mark_status(row["id"], "muted")
             else:
                 enabled.append(row)

@@ -224,6 +224,29 @@ class Store:
         )
         return [{"id": r["id"], **json.loads(r["payload"])} for r in rows]
 
+    def reschedule_note(self, outbox_id: int, at: datetime) -> bool:
+        row = self.db.execute("SELECT payload FROM outbox WHERE id = ? AND type = 'note' AND status = 'pending'",
+                              (outbox_id,)).fetchone()
+        if row is None:
+            return False
+        payload = {**json.loads(row["payload"]), "at": at.astimezone(timezone.utc).isoformat()}
+        with self.db:
+            self.db.execute("UPDATE outbox SET payload = ?, next_attempt_at = ? WHERE id = ?",
+                            (json.dumps(payload, ensure_ascii=False), _ts(at), outbox_id))
+        return True
+
+    def mute_pending(self, type_: str, uid: str) -> int:
+        """Henüz gönderilmemiş belirli olayları sustur (ör. bir ödevin bekleyen teslim hatırlatması)."""
+        rows = self.db.execute("SELECT id, payload FROM outbox WHERE type = ? AND status = 'pending'", (type_,))
+        ids = [r["id"] for r in rows if json.loads(r["payload"]).get("uid") == uid]
+        for outbox_id in ids:
+            self.mark_status(outbox_id, "muted")
+        return len(ids)
+
+    def outbox_row(self, outbox_id: int) -> dict | None:
+        row = self.db.execute("SELECT * FROM outbox WHERE id = ?", (outbox_id,)).fetchone()
+        return {**dict(row), "payload": json.loads(row["payload"])} if row else None
+
     def cancel_note(self, outbox_id: int) -> bool:
         with self.db:
             cur = self.db.execute(
