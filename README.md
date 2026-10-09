@@ -14,14 +14,15 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
   - Teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce.
   - Her sabah günün özeti.
   - Öğrencinin kendi kurduğu saatli hatırlatmalar.
-- **LLM ajanı:** Sohbete yazılan mesajı Grok ya da DeepSeek araçlarla cevaplar ve botu yönetebilir:
-  - Belirli bir saate kadar sessiz mod.
-  - Bildirim türlerini ve özellikleri açıp kapatma.
-  - Ödevi "teslim ettim" olarak işaretleme.
-  - Saatli hatırlatma kurma.
-  - Materyal gönderme ve siteyi hemen kontrol etme.
+- **LLM ajanı:** Sohbete yazılan mesajı Grok ya da DeepSeek araçlarla cevaplar ve botu yönetir:
+  - **Site:** Siteyi hemen kontrol edip yeni gelenleri tek tek söyler. Ödev sayfasını canlı açar, ekleri ve materyalleri (bir seferde 10'a kadar) gönderir. Kilitlenen girişi tekrar dener.
+  - **Belgeler:** PDF materyalleri ve ödev eklerini okur, içinden soru cevaplar, kaynak sayfayı söyler. PDF gönderdiğinde okumayı teklif eder; gönderilen PDF'nin altında "Oku ve özetle" butonu çıkar.
+  - **Bildirimler:** Belirli bir saate kadar sessiz mod (acil olanlar gelsin ya da hiçbir şey gelmesin). Bildirim türlerini, özellikleri ve tek bir dersi kapatıp açar. Biriken bildirimleri gösterip hemen gönderir, geçmiş bir bildirimi tekrar yollar.
+  - **Hatırlatmalar:** Saatli hatırlatma kurar, erteler, iptal eder. Bir ödev için ek hatırlatma kurar ("1 saat kala da") ya da otomatik hatırlatmalarını susturur. Ödevi "teslim ettim" olarak işaretler.
+  - **Durum ve ayarlar:** Aktif hatırlatma takvimini, botun durumunu ve veritabanını gösterir; veritabanına salt okunur SQL ile bakar. Sabah özetini hemen gönderir, özet ve gece saatlerini değiştirir, erişim uyarısı eşiğini ayarlar.
 
   Yaptığı her değişiklik cevabın altında "Yapılanlar" olarak listelenir.
+- **Eylem kontrolü (JEV):** Ajan bir şeyi kapatmak, susturmak ya da silmek gibi riskli bir eylem yapmadan önce JEV'e sorar: öğrenci bunu açıkça istedi mi, riskli mi? İstenmemiş riskli eylem durdurulur ve ajan ne istediğini sorar. Döngüde insan yoktur; bir öneriyi "evet" diye onaylamak da istek sayılır.
 - **Kalıcı hafıza:** Ajan, öğrencinin söylediği kalıcı tercihleri ve bilgileri (bırakılan ders, çalışma saatleri…) kendisi not eder ve sonraki her cevapta dikkate alır. Notlar `/hafiza`'dan görülür ve silinir.
 - **Karar katmanı (JEV):** Her yeni bulgu önce TypeSafe JEV'e sorulur.
   - JEV bulgunun teslim gerektirip gerektirmediğine, sınavla ya da tarih değişikliğiyle ilgili olup olmadığına bakar.
@@ -44,8 +45,10 @@ flowchart LR
     J -->|emin: uyarı| PO[Pushover]
     J -->|kararsız ya da<br/>açıklama gerekli| A
     TG -->|serbest metin| A[LLM ajanı<br/>Grok / DeepSeek]
-    A -->|cevap ve Yapılanlar| TG
+    A -->|cevap, dosyalar,<br/>Yapılanlar| TG
     A <-->|okuma ve eylem araçları| DB
+    A -->|riskli eylem:<br/>istendi mi?| J
+    A -->|ödev sayfası, PDF| S
     DB -->|sistem uyarıları| PO
     classDef optional stroke-dasharray: 5 5
     class J,A,PO optional
@@ -64,11 +67,14 @@ Hangi bileşenin çalışacağı her bulguda yeniden seçilir:
 - LLM kapalıysa JEV'in kararsız kaldığı bulgular kaçmasın diye uyarı olarak gider.
 - Pushover kapalıysa uyarılar Telegram'a gelir.
 
-**Sohbet:** Sohbete yazılan mesaj JEV'e uğramadan doğrudan LLM ajanına gider. Ajan iki tür araç kullanır:
-- **Okuma araçları:** Kayıtlara, ajandaya ve botun kendi durumuna bakar.
-- **Eylem araçları:** Sessiz modu, ayarları, hatırlatmaları ve hafızayı değiştirir.
+**Sohbet:** Sohbete yazılan mesaj JEV'e uğramadan doğrudan LLM ajanına gider. Ajan üç tür araç kullanır:
+- **Okuma araçları:** Kayıtlara, ajandaya, hatırlatma takvimine, botun kendi durumuna ve (salt okunur SQL ile) veritabanına bakar.
+- **Site araçları:** Ödev sayfasını canlı açar, PDF'leri okur.
+- **Eylem araçları:** Sessiz modu, ayarları, hatırlatmaları ve hafızayı değiştirir; dosya ve bildirim gönderir.
 
-Bulguları değerlendirirken eylem araçları ajana verilmez. Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
+Riskli bir eylemden önce JEV'e sorulur: öğrenci bunu açıkça istedi mi? İstenmemiş riskli eylem yapılmaz.
+
+Bulguları değerlendirirken site ve eylem araçları ajana verilmez. Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
 
 Yanlış alarm vermemek için algılama temkinli çalışır:
 - İlk kurulumda var olan kayıtlar bildirilmez.
@@ -85,6 +91,7 @@ Yanlış alarm vermemek için algılama temkinli çalışır:
 | Veri | SQLite |
 | LLM | OpenAI uyumlu API: xAI Grok, DeepSeek |
 | Karar katmanı | TypeSafe JEV |
+| Belge okuma | pypdf |
 | Uyarılar | Pushover (httpx) |
 | Çalıştırma | Docker, Docker Compose, Windows Görev Zamanlayıcı |
 | Test | pytest |
@@ -104,7 +111,9 @@ ekampus/
   engine.py      tarama zamanlaması, sağlık uyarıları, sessiz mod, bildirim gönderimi
   jev.py         JEV istemcisi ve bulgunun karar katmanına giden hali
   router.py      bulgu yönlendirici: JEV, LLM ve uyarı arasında karar
-  agent.py       ajanın araç kutusu: okuma ve eylem araçları
+  agent.py       ajanın araç kutusu: okuma, site ve eylem araçları
+  guard.py       riskli eylemlerden önce JEV kontrolü
+  documents.py   PDF'den sayfa sayfa metin
   llm.py         LLM asistanı: sohbet, bulgu değerlendirmesi, açıklama, sabah planı
   pushover.py    Pushover istemcisi
   watchdog.py    takılma bekçisi
@@ -207,12 +216,14 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `/girisdene` | Reddedilen bir girişten sonra login kilidini kaldırıp tekrar dene |
 
 **Komutların dışında bota normal cümleyle de yazılabilir:**
-- "bu hafta neye odaklanayım?"
-- "cuma 18'e kadar rahatsız etme, acil olsa bile"
-- "yarın 10'da Ağlar raporunu hatırlat"
-- "Lab Raporu 2'yi teslim ettim"
-- "duyuruları kapat"
-- "ağlar dersinin son slaytını at"
+- "yeni bir şey var mı bak"
+- "bu hafta neye odaklanayım?", "aktif hatırlatmalarım neler?"
+- "cuma 18'e kadar rahatsız etme, acil olsa bile", "sessizdeyken neler birikti, şimdi gönder"
+- "yarın 10'da Ağlar raporunu hatırlat", "bunu 1 saat ertele", "Homework 4 için 2 saat kala da hatırlat"
+- "Homework 4'ün eklerini at", "lecture 3'ü oku, sınav ne zaman yazıyor?"
+- "ağlar dersinin bütün slaytlarını at"
+- "Lab Raporu 2'yi teslim ettim", "Fizik dersinden bildirim gelmesin", "duyuruları kapat"
+- "sabah özeti 9'da gelsin", "dünkü duyuruyu tekrar at"
 - "Ağlar'ı bıraktım, aklında olsun"
 
 LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştırır.
@@ -227,9 +238,11 @@ LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştı
   - İkisi de yalnızca ödev, not, duyuru ve takvim gibi ders verilerini görür; kimlik bilgilerine ve anahtarlara erişimleri yoktur. Bu veriler kullanılan LLM sağlayıcısına ve TypeSafe'e gider.
   - Uyarı göndermesi soyut bir araçla olur: model kanalın nasıl çalıştığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
 - **Ajanın eylemleri:**
-  - Ajan sadece sohbette, senin mesajına cevap verirken eylem yapar; bulguları değerlendirirken eylem araçları ona hiç verilmez.
+  - Ajan sadece sohbette, senin mesajına cevap verirken eylem yapar; bulguları değerlendirirken eylem ve site araçları ona hiç verilmez.
+  - Riskli eylemlerden önce JEV'e "öğrenci bunu açıkça istedi mi" diye sorulur; istenmemiş riskli eylem durdurulur.
   - Zamanlar ve sınırlar kodda doğrulanır.
-  - Her değişiklik cevabın altında listelenir ve `/llmlog`'da "[eylem]" olarak görünür.
+  - Veritabanı sorguları salt okunurdur: SQLite yetkilendiricisi yazmayı reddeder, uzun sorgu kesilir.
+  - Her değişiklik cevabın altında listelenir. `/llmlog`'da eylemler "[eylem]", JEV kontrolleri de "JEV eylem kontrolü" olarak görünür.
 
 ## Geliştirme
 
