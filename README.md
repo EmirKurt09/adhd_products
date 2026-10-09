@@ -11,6 +11,7 @@ e-Kampüs yeni bir ödev, duyuru ya da not girildiğinde öğrenciye haber vermi
 - **Hatırlatma:** teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce; her sabah günün özeti.
 - **Uyarı yöneticisi:** bildirim türlerini açıp kapatma, gece ve sessiz mod; siteye erişilemediğinde açıklamalı uyarı.
 - **LLM asistanı:** Grok ya da DeepSeek ile serbest soru, ödev özetleri ve günlük plan; `/llmlog` ile modelin hangi veriye baktığı görülebilir.
+- **Sistem izleme:** çökme, takılma, hata artışı, siteye erişilememesi ve giriş sorunları Pushover'a bildirilir; takılan bot kendini yeniden başlatır.
 - **Güvenilirlik:** hiçbir bildirim kaybolmaz ya da iki kez gelmez.
 
 ## Nasıl çalışır
@@ -91,6 +92,8 @@ cp .env.example .env                                             # sonra doldur
 
 Telegram'a bağlamak için `TELEGRAM_OWNER_CHAT_ID`'yi boş bırakıp botu başlat ve bota `/start` yaz. Bot sana chat ID'ni söyler; onu `.env`'e yazıp botu yeniden başlat. Bot bundan sonra yalnızca bu hesapla konuşur.
 
+Sistem uyarılarını Pushover'a almak için pushover.net'te bir uygulama oluşturup uygulama token'ını ve kullanıcı anahtarını `.env`'e yaz; `doctor` anahtarları doğrular, `test-notify --olay pushover` deneme gönderir.
+
 Windows'ta oturum açılınca arka planda başlaması için:
 
 ```powershell
@@ -115,6 +118,8 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `EKAMPUS_USERNAME`, `EKAMPUS_PASSWORD` | ÖBS kullanıcı adı ve şifresi | |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID` | Bot token'ı ve botun konuşacağı tek hesap | |
 | `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | `xai` ya da `deepseek`, API anahtarı, model | `deepseek`, boş, otomatik |
+| `PUSHOVER_APP_TOKEN`, `PUSHOVER_USER_KEY` | Sistem uyarıları için Pushover; boşsa uyarılar Telegram'a gider | boş |
+| `ERROR_SPIKE_PER_HOUR` | Bir saatte kaç hata birikince "hata artışı" uyarısı gelir | 5 |
 | `LLM_DAILY_TOKEN_BUDGET` | Günlük token sınırı | 200000 |
 | `LLM_HISTORY_MESSAGES` | Her soruda modele tekrar gönderilen son mesaj sayısı | 20 |
 | `POLL_INTERVAL_MIN`, `NIGHT_POLL_INTERVAL_MIN` | Gündüz ve gece kontrol aralığı (dakika) | 15, 60 |
