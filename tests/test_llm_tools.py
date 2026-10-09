@@ -36,7 +36,8 @@ def test_tools_are_declared_for_every_handler(settings):
     for tool in a.toolbox.specs("triage"):
         name = tool["function"]["name"]
         args = {"days": 7} if name == "agenda" else {"text": "ödev"} if name == "search" else \
-            {"kind": "assignment", "uid": "1"} if name == "get_item" else {}
+            {"kind": "assignment", "uid": "1"} if name == "get_item" else \
+            {"sql": "SELECT count(*) FROM items"} if name == "query_db" else {}
         assert "hata" not in str(a.run_tool(name, args))[:20], name
 
 

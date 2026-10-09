@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
@@ -189,6 +191,20 @@ class Toolbox:
                  params({"limit": {"type": "integer", "maximum": 30}}), self._recent_notifications),
             Tool("list_reminders", "Öğrencinin kurduğu, zamanı henüz gelmemiş kişisel hatırlatmalar.", params(),
                  self._list_reminders),
+            Tool("upcoming_reminders", "Önümüzdeki N gün içinde gelecek BÜTÜN hatırlatmalar, zaman sırasıyla: otomatik "
+                                       "teslim hatırlatmaları (24 ve 3 saat kala), canlı ders uyarıları ve öğrencinin "
+                                       "kurduğu hatırlatmalar. \"Aktif hatırlatmalarım ne?\" sorusu için.",
+                 params({"days": {"type": "integer", "minimum": 1, "maximum": 60}}), self._upcoming_reminders),
+            Tool("query_db", "Botun veritabanında salt okunur SQL (sadece SELECT/WITH, en fazla 50 satır). Diğer araçlar "
+                             "yetmediğinde kullan. Tablolar: items(kind: assignment|announcement|grade|file|live|event, "
+                             "uid, title, course, due_at, body, status: active|gone, done_manual, meta JSON {submitted, "
+                             "grade, viewed}, extra JSON, first_seen, updated_at); outbox(id, type: new|changed|"
+                             "due_changed|reminder|live_soon|note|alert|explain, payload JSON, status: pending|sent|muted|"
+                             "skipped, created_at, next_attempt_at, sent_at); memory(id, text, created_at); chat(role, "
+                             "content, created_at); llm_log(created_at, data JSON); kv(key, value); documents(key, title, "
+                             "created_at). Zamanlar UTC ISO metin; yerel(sütun) fonksiyonu İstanbul saatine çevirir. "
+                             "JSON için json_extract(meta, '$.submitted').",
+                 params({"sql": {"type": "string"}}, ["sql"]), self._query_db),
         ]
 
     def _brief(self, d: dict, body: bool = False) -> dict:
@@ -282,6 +298,45 @@ class Toolbox:
         now = datetime.now(timezone.utc)
         return [{"id": n["id"], "zaman": fmt_dt(M.parse_dt(n["at"]), self.s.tz, now),
                  "kalan": remaining(M.parse_dt(n["at"]), now), "metin": n["text"]} for n in self.store.notes_pending()]
+
+    def _upcoming_reminders(self, args: dict, turn: Turn) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(days=int(args.get("days", 7)))
+        planned: list[tuple[datetime, dict]] = []
+        for due in self.store.due_items():
+            if due.kind == "assignment":
+                if due.submitted or due.done_manual or due.due_at <= now:
+                    continue
+                for hours in self.s.reminder_hours:
+                    at = due.due_at - timedelta(hours=hours)
+                    if now < at <= end:
+                        planned.append((at, {"tür": f"teslim hatırlatması ({hours} saat kala)", "başlık": due.title,
+                                             "ders": due.course, "uid": due.uid}))
+            elif due.kind == "live":
+                at = due.due_at - timedelta(minutes=self.s.live_lesson_reminder_min)
+                if now < at <= end:
+                    planned.append((at, {"tür": "canlı ders uyarısı", "başlık": due.title, "ders": due.course}))
+        for note in self.store.notes_pending():
+            at = M.parse_dt(note["at"])
+            if at and at <= end:
+                planned.append((at, {"tür": "kişisel hatırlatma", "başlık": note["text"], "id": note["id"]}))
+        planned.sort(key=lambda p: p[0])
+        return [{"zaman": when(at, self.s.tz, now), **entry} for at, entry in planned[:60]]
+
+    def _query_db(self, args: dict, turn: Turn) -> dict:
+        sql = str(args.get("sql") or "").strip().rstrip(";").strip()
+        if not re.match(r"(?is)^(select|with)\b", sql) or ";" in sql:
+            return {"hata": "sadece tek bir SELECT (ya da WITH ... SELECT) sorgusu çalıştırılabilir"}
+        try:
+            rows, columns = self.store.read_only_query(sql, limit=50, functions={"yerel": self._local_time})
+        except sqlite3.Error as e:
+            return {"hata": f"sorgu çalışmadı: {e}"}
+        clip = lambda v: v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v  # noqa: E731
+        return {"sütunlar": columns, "satırlar": [[clip(v) for v in row] for row in rows], "satır_sayısı": len(rows)}
+
+    def _local_time(self, value):
+        dt = M.parse_dt(value) if isinstance(value, str) and value else None
+        return dt.astimezone(self.s.tz).strftime("%Y-%m-%d %H:%M") if dt else value
 
     # ── Siteye giden araçlar (sadece sohbet; durum değiştirmez) ───────────
     def _site_tools(self) -> list[Tool]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -368,6 +369,29 @@ class Store:
     def memory_clear(self) -> int:
         with self.db:
             return self.db.execute("DELETE FROM memory").rowcount
+
+    # ── Ajan için salt okunur sorgu ───────────────────────────────────────
+    def read_only_query(self, sql: str, limit: int = 50, functions: dict | None = None,
+                        max_seconds: float = 2.0) -> tuple[list[tuple], list[str]]:
+        """SQLite yetkilendiricisiyle sadece okuma: yazma, ATTACH, PRAGMA ve şema değişikliği reddedilir;
+        uzun süren sorgu yarıda kesilir. (satırlar, sütun adları)"""
+        allowed = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+
+        def authorize(action, *_):
+            return sqlite3.SQLITE_OK if action in allowed else sqlite3.SQLITE_DENY
+
+        deadline = time.monotonic() + max_seconds
+        for name, fn in (functions or {}).items():
+            self.db.create_function(name, 1, fn, deterministic=True)
+        self.db.set_authorizer(authorize)
+        self.db.set_progress_handler(lambda: int(time.monotonic() > deadline), 10_000)
+        try:
+            cur = self.db.execute(sql)
+            rows = [tuple(r) for r in cur.fetchmany(limit)]
+            return rows, [d[0] for d in cur.description or []]
+        finally:
+            self.db.set_authorizer(None)
+            self.db.set_progress_handler(None, 0)
 
     # ── Okunmuş belgeler (PDF metni, sayfa sayfa) ─────────────────────────
     def doc_get(self, key: str) -> dict | None:

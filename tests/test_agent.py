@@ -272,3 +272,32 @@ def test_duplicate_reminder_call_counts_once(box, settings):
     results = [json.loads(m["content"]) for m in sent[1]["messages"] if m["role"] == "tool"]
     assert results[0] == results[1] and results[0]["durum"] == "tamam"  # model "zaten kuruluydu" sanmasın
     assert reply.text.count("Hatırlatma kuruldu") == 1 and len(box.store.notes_pending()) == 1
+
+
+# ── Veritabanı ve hatırlatma takvimi ──────────────────────────────────────────
+
+def test_query_db_reads_but_never_writes(box):
+    result = box.run_read("query_db", {"sql": "SELECT title, yerel(due_at) AS teslim FROM items WHERE kind = 'assignment'"})
+    assert result["sütunlar"] == ["title", "teslim"] and result["satırlar"][0][0] == "Lab Raporu"
+    assert len(result["satırlar"][0][1]) == 16  # '2026-10-11 12:00' gibi yerel saat
+    for sql in ("DELETE FROM items", "UPDATE items SET title = 'x'", "SELECT 1; DROP TABLE items",
+                "WITH x AS (SELECT 1) DELETE FROM memory", "ATTACH DATABASE 'x.db' AS x", "PRAGMA table_info(items)"):
+        assert "hata" in box.run_read("query_db", {"sql": sql}), sql
+    assert box.store.item("assignment", "7")["title"] == "Lab Raporu"
+    box.store.memory_add("hala yazılabilir", datetime.now(timezone.utc))  # yetkilendirici sorgudan sonra kalkar
+
+
+def test_query_db_stops_runaway_queries(box):
+    sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n"
+    assert "hata" in box.run_read("query_db", {"sql": sql})
+
+
+def test_upcoming_reminders_merge_automatic_and_personal(box, settings):
+    now = datetime.now(timezone.utc)
+    box.engine.schedule_note("ilaç", now + timedelta(hours=5), now)
+    upcoming = box.run_read("upcoming_reminders", {"days": 7})
+    kinds = [u["tür"] for u in upcoming]
+    # Lab Raporu 2 gün sonra: 24 saat ve 3 saat kala hatırlatmaları; arada kişisel hatırlatma
+    assert kinds == ["kişisel hatırlatma", "teslim hatırlatması (24 saat kala)", "teslim hatırlatması (3 saat kala)"]
+    asyncio.run(box.call("mark_assignment", {"uid": "7", "done": True}, Turn()))
+    assert [u["tür"] for u in box.run_read("upcoming_reminders", {})] == ["kişisel hatırlatma"]
