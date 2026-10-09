@@ -177,9 +177,10 @@ class Store:
         )
 
     # ── Outbox ────────────────────────────────────────────────────────────
-    def enqueue(self, event: Event, now: datetime) -> bool:
+    def enqueue(self, event: Event, now: datetime, not_before: datetime | None = None) -> bool:
+        """not_before: bu zamandan önce gönderilmez (kişisel hatırlatmalar)."""
         with self.db:
-            return self._enqueue(event.key, event.type, event.data, now)
+            return self._enqueue(event.key, event.type, event.data, now, not_before=not_before)
 
     def enqueue_planned(self, planned: list[Planned], now: datetime) -> int:
         added = 0
@@ -188,12 +189,27 @@ class Store:
                 added += self._enqueue(p.key, p.type, p.data, now, status=p.status)
         return added
 
-    def _enqueue(self, key: str, type_: str, data: dict, now: datetime, status: str = "pending") -> bool:
+    def _enqueue(self, key: str, type_: str, data: dict, now: datetime, status: str = "pending",
+                 not_before: datetime | None = None) -> bool:
         cur = self.db.execute(
             "INSERT OR IGNORE INTO outbox (key, type, payload, status, created_at, next_attempt_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (key, type_, json.dumps(data, ensure_ascii=False), status, _ts(now), _ts(now)),
+            (key, type_, json.dumps(data, ensure_ascii=False), status, _ts(now), _ts(not_before or now)),
         )
+        return cur.rowcount == 1
+
+    # ── Kişisel hatırlatmalar (outbox'ta 'note' olayları) ─────────────────
+    def notes_pending(self) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT id, payload FROM outbox WHERE type = 'note' AND status = 'pending' ORDER BY next_attempt_at, id"
+        )
+        return [{"id": r["id"], **json.loads(r["payload"])} for r in rows]
+
+    def cancel_note(self, outbox_id: int) -> bool:
+        with self.db:
+            cur = self.db.execute(
+                "UPDATE outbox SET status = 'skipped' WHERE id = ? AND type = 'note' AND status = 'pending'", (outbox_id,)
+            )
         return cur.rowcount == 1
 
     def pending(self, now: datetime, limit: int = 50) -> list[sqlite3.Row]:
@@ -276,7 +292,8 @@ class Store:
 
     def outbox_stats(self) -> dict:
         row = self.db.execute(
-            "SELECT SUM(status = 'pending') AS pending, MAX(sent_at) AS last_sent, "
+            # kurulmuş ama zamanı gelmemiş kişisel hatırlatmalar "bekleyen bildirim" sayılmaz
+            "SELECT SUM(status = 'pending' AND type != 'note') AS pending, MAX(sent_at) AS last_sent, "
             "SUM(status = 'pending' AND attempts > 0) AS failing FROM outbox"
         ).fetchone()
         return {"pending": row["pending"] or 0, "failing": row["failing"] or 0, "last_sent": row["last_sent"]}

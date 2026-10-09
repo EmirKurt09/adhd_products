@@ -55,7 +55,7 @@ def toggle(store: Store, key: str) -> dict:
 
 def category_of(event_type: str, payload: dict) -> str | None:
     """Bir bildirimin ait olduğu kategori. None: her zaman gönderilir (kurulum özeti, kritik uyarılar)."""
-    if event_type in ("baseline", "scope_added"):
+    if event_type in ("baseline", "scope_added", "note"):  # note: kullanıcının açıkça kurduğu hatırlatma
         return None
     if event_type == "alert":
         return None if payload.get("critical") else payload.get("category", "system")

@@ -89,8 +89,13 @@ class Engine:
         raw = self.store.get("mute_until")
         return datetime.fromisoformat(raw) if raw else None
 
-    def set_mute(self, until: datetime | None) -> None:
+    def set_mute(self, until: datetime | None, allow_urgent: bool = True) -> None:
+        """allow_urgent=False: tam sessiz; acil olanlar da bekler, sadece kritik giriş uyarıları geçer."""
         self.store.set("mute_until", until.isoformat() if until else "")
+        self.store.set("mute_level", "acil" if allow_urgent or until is None else "tam")
+
+    def mute_full(self) -> bool:
+        return self.store.get("mute_level", "acil") == "tam"
 
     def feature_on(self, key: str) -> bool:
         """LLM/JEV/Pushover: anahtarı var ve kullanıcı açık bırakmış mı (her çağrıda yeniden bakılır)."""
@@ -306,6 +311,16 @@ class Engine:
                    "course": data.get("course"), "text": text[:2000]}
         return self.store.enqueue(Event("explain", f"explain:{event.key}", payload), now or utcnow())
 
+    def schedule_note(self, text: str, at: datetime, now: datetime | None = None) -> int | None:
+        """Kişisel hatırlatma: outbox'a zamanı gelince gönderilmek üzere girer. Aynı saat ve metin tekrar girmez."""
+        now = now or utcnow()
+        digest = hashlib.sha1(text.encode()).hexdigest()[:10]
+        key = f"note:{at.astimezone(timezone.utc).isoformat(timespec='minutes')}:{digest}"
+        payload = {"text": text, "at": at.astimezone(timezone.utc).isoformat(), "set_at": now.isoformat()}
+        if not self.store.enqueue(Event("note", key, payload), now, not_before=at):
+            return None
+        return self.store.outbox_by_key(key)["id"]
+
     def on_clean_exit(self) -> None:
         self.store.set("running", "0")
 
@@ -325,7 +340,7 @@ class Engine:
     def hold_reason(self, now: datetime) -> str | None:
         muted = self.muted_until()
         if muted and muted > now:
-            return "sessiz"
+            return "tam sessiz" if self.mute_full() else "sessiz"
         if self.is_night(now) and PR.load(self.store)["night"]:
             return "gece"
         return None
@@ -334,7 +349,7 @@ class Engine:
     def is_urgent(row) -> bool:
         if row["type"] == "alert":
             return json.loads(row["payload"]).get("urgent", True)
-        if row["type"] in ("live_soon", "baseline"):
+        if row["type"] in ("live_soon", "baseline", "note"):  # note: kullanıcının saatini kendi seçtiği hatırlatma
             return True
         if row["type"] == "reminder":
             return json.loads(row["payload"]).get("hours", 99) <= 3
@@ -357,7 +372,10 @@ class Engine:
             else:
                 enabled.append(row)
         held = self.hold_reason(now)
-        rows = [r for r in enabled if not held or self.is_urgent(r)]
+        if held == "tam sessiz":  # "hiç rahatsız etme": sadece kapatılamayan kritik uyarılar (giriş sorunları)
+            rows = [r for r in enabled if r["type"] == "alert" and json.loads(r["payload"]).get("critical")]
+        else:
+            rows = [r for r in enabled if not held or self.is_urgent(r)]
 
         groups: dict[tuple[str, str], list] = defaultdict(list)
         singles = []

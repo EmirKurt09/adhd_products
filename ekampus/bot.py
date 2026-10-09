@@ -61,7 +61,8 @@ COMMANDS = [
     ("notlar", "Notlar"), ("duyurular", "Son duyurular"), ("dosyalar", "Ders materyalleri: ders seç, dosyayı al"),
     ("dersler", "Dersler ve ilerleme"), ("takvim", "30 günlük takvim"), ("yenile", "Siteyi şimdi kontrol et"),
     ("bildirimler", "Uyarı yöneticisi: aç/kapa, sessiz, geçmiş"),
-    ("ayarlar", "Özellikler: LLM, JEV, Pushover aç/kapa"), ("durum", "Sistem durumu"),
+    ("ayarlar", "Özellikler: LLM, JEV, Pushover aç/kapa"), ("hatirlatmalar", "Kurduğun hatırlatmalar"),
+    ("durum", "Sistem durumu"),
     ("sessiz", "Bildirimleri beklet: /sessiz 2s"), ("unut", "Sohbet geçmişini sil"),
     ("llmlog", "LLM son cevapta neye baktı: /llmlog, /llmlog 3, /llmlog liste"),
     ("yardim", "Yardım"),
@@ -276,8 +277,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     stats = c.store.outbox_stats()
     lines.append(f"Bekleyen bildirim: {stats['pending']}" + (f" (gönderilemeyen {stats['failing']})" if stats["failing"] else ""))
     hold = c.engine.hold_reason(now)
-    if hold == "sessiz":
-        lines.append(f"Sessiz: {M.fmt_dt(c.engine.muted_until(), c.s.tz, now)} kadar")
+    if hold in ("sessiz", "tam sessiz"):
+        level = " (tam sessiz)" if hold == "tam sessiz" else ""
+        lines.append(f"Sessiz: {M.fmt_dt(c.engine.muted_until(), c.s.tz, now)} kadar{level}")
     elif hold == "gece":
         lines.append("Gece modu: acil olmayanlar sabah gelir")
     lines.append("\n<b>Özellikler</b>")
@@ -288,11 +290,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 def settings_message(c: Ctx) -> M.Message:
-    return M.settings_view(features.states(c.s, c.store))
+    return M.settings_view(features.states(c.s, c.store), reminder_count=len(c.store.notes_pending()))
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply(update, settings_message(deps(context)))
+
+
+async def cmd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    c = deps(context)
+    await reply(update, M.notes_view(c.store.notes_pending(), c.s.tz, now_utc()))
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -387,7 +394,7 @@ def manager_message(c: Ctx) -> M.Message:
         "guard_blocked": guard.get("blocked"), "guard_reason": guard.get("reason"),
         "parse_problems": sorted(json.loads(c.store.get("parse_streaks", "{}"))),
         "pending": stats["pending"], "sent_24h": c.store.sent_since(now - timedelta(hours=24)),
-        "muted_until": c.engine.muted_until(),
+        "muted_until": c.engine.muted_until(), "mute_full": c.engine.mute_full(),
         "alert_channel": "Pushover" if c.s.pushover_enabled else "Telegram (Pushover ayarlı değil)",
     }
     night = f"{c.s.night_start:%H:%M}–{c.s.night_end:%H:%M}"
@@ -498,6 +505,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "set":
         await query.answer()
         await _edit(query, settings_message(c))
+    elif action == "rem":
+        sub, _, note_id = arg.partition(":")
+        if sub == "del" and note_id.isdigit():
+            done = c.store.cancel_note(int(note_id))
+            await query.answer("Hatırlatma iptal edildi." if done else "Bu hatırlatma zaten yok.")
+        else:
+            await query.answer()
+        await _edit(query, M.notes_view(c.store.notes_pending(), c.s.tz, now_utc()))
     elif action == "mute":
         now = now_utc()
         until = None if arg == "off" else _next_morning(c, now) if arg == "morning" else now + timedelta(hours=int(arg))
@@ -816,6 +831,7 @@ def build_app(settings: Settings) -> Application:
         (("duyurular",), cmd_announcements), (("dosyalar",), cmd_files), (("dersler",), cmd_courses),
         (("durum",), cmd_status), (("yenile",), cmd_refresh), (("sessiz",), cmd_mute),
         (("bildirimler", "uyarilar", "alarm"), cmd_manager), (("ayarlar", "ozellikler"), cmd_settings),
+        (("hatirlatmalar",), cmd_notes),
         (("girisdene",), cmd_retry_login), (("unut",), cmd_forget), (("llmlog",), cmd_llmlog),
     ]:
         app.add_handler(CommandHandler(list(names), handler, filters=owner))

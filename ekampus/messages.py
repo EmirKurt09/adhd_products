@@ -209,6 +209,9 @@ def render_event(event_type: str, data: dict, tz: ZoneInfo, now: datetime) -> Me
     if event_type == "alert":
         return Message(data.get("text", "Uyarı"))
 
+    if event_type == "note":
+        return Message(f"<b>Hatırlatma:</b> {escape(clip(data.get('text', ''), 1000))}")
+
     if event_type == "explain":
         return Message(f"<b>Kısaca:</b> {title}{_course(data)}\n{escape(clip(data.get('text', ''), 1500))}", silent=True)
 
@@ -387,7 +390,8 @@ def digest_view(rows: list[dict], fresh: dict[str, list], tz: ZoneInfo, now: dat
 # ── Uyarı yöneticisi ──────────────────────────────────────────────────────────
 
 HISTORY_LABEL = {"due_changed": "Tarih değişti", "changed": "Güncellendi", "reminder": "Hatırlatma",
-                 "live_soon": "Canlı ders", "scope_added": "İzlemeye alındı", "alert": "Sistem"}
+                 "live_soon": "Canlı ders", "scope_added": "İzlemeye alındı", "alert": "Sistem",
+                 "note": "Hatırlatman", "explain": "Açıklama"}
 
 
 def ago(dt: datetime | None, now: datetime) -> str:
@@ -431,7 +435,9 @@ def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, st
         lines.append(f"Sistem uyarıları: {escape(status['alert_channel'])}")
     muted = status.get("muted_until")
     if muted and muted > now:
-        lines.append(f"Sessiz: {fmt_dt(muted, tz, now)} kadar (acil olanlar yine gelir)")
+        level = ("tam sessiz, sadece kritik giriş uyarıları gelir" if status.get("mute_full")
+                 else "acil olanlar yine gelir")
+        lines.append(f"Sessiz: {fmt_dt(muted, tz, now)} kadar ({level})")
     lines.append(f"Gece modu ({night}): {on_off(prefs.get('night'))}")
     lines.append("\nAyarı değiştirmek için butona dokun.")
 
@@ -450,6 +456,20 @@ def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, st
 
 def _btn(text: str, data: str) -> Button:
     return Button(text, data=data)
+
+
+def notes_view(notes: list[dict], tz: ZoneInfo, now: datetime) -> Message:
+    """Kurulmuş kişisel hatırlatmalar; her birinin yanında iptal butonu."""
+    lines = ["<b>Hatırlatmaların</b>"]
+    if not notes:
+        lines.append("\nKurulu hatırlatma yok. Bana yazman yeter: <i>“yarın 10'da raporu hatırlat”</i>")
+    buttons = []
+    for note in notes[:20]:
+        at = parse_dt(note.get("at"))
+        lines.append(f"\n#{note['id']} {fmt_dt(at, tz, now)} · {remaining(at, now)}\n{escape(clip(note.get('text', ''), 200))}")
+        buttons.append([_btn(f"İptal #{note['id']}: {clip(note.get('text', ''), 30)}", f"rem:del:{note['id']}")])
+    buttons.append([_btn("Ayarlar", "set:show")])
+    return Message("\n".join(lines), buttons)
 
 
 def history_view(rows: list, tz: ZoneInfo, now: datetime) -> Message:
