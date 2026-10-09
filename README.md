@@ -35,46 +35,76 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
 
 ## Nasıl çalışır
 
+Bot iki hattan oluşur: taramadan gelen **bulgular** ve öğrencinin yazdığı **sohbet**. JEV ikisinde de bir karar noktasında durur ama farklı görevle: bulgu hattında öncüdür, sohbet hattında bekçidir. Sohbetin kendisi JEV'e hiç uğramaz.
+
+### Bulgu hattı: JEV öncü
+
 ```mermaid
 flowchart LR
     S[e-Kampüs] -->|Playwright, salt okunur| T[Tarama ve<br/>fark algılama]
-    T --> DB[(SQLite<br/>kayıtlar, bildirim kuyruğu,<br/>hafıza, hatırlatmalar)]
-    DB -->|bildirimler| TG[Telegram botu]
-    TG <--> U((Öğrenci))
-    T -->|yeni bulgular| J{JEV<br/>karar katmanı}
-    J -->|emin: uyarı| PO[Pushover]
-    J -->|kararsız ya da<br/>açıklama gerekli| A
-    TG -->|serbest metin| A[LLM ajanı<br/>Grok / DeepSeek]
-    A -->|cevap, dosyalar,<br/>Yapılanlar| TG
-    A <-->|okuma ve eylem araçları| DB
-    A -->|riskli eylem:<br/>istendi mi?| J
-    A -->|ödev sayfası, PDF| S
-    DB -->|sistem uyarıları| PO
+    T --> DB[(SQLite)]
+    T -->|her yeni ya da<br/>değişen kayıt| Q[Bildirim kuyruğu]
+    Q --> TG[Telegram]
+    T -->|yeni bulgular| JB{"JEV<br/>bulgu kararı"}
+    JB -->|emin: önemli| PO[Pushover uyarısı]
+    JB -->|kararsız| AT["LLM<br/>bağlama bakıp karar"]
+    JB -->|açıklama gerekli| AE["LLM<br/>kısa açıklama"]
+    JB -->|önemsiz| N[Sadece normal bildirim]
+    AT -->|önemliyse| PO
+    AE --> Q
+    Q -->|sistem uyarıları| PO
+
     classDef optional stroke-dasharray: 5 5
-    class J,A,PO optional
+    class JB,AT,AE,PO optional
 ```
 
-Kesik çerçeveli bileşenler isteğe bağlıdır. Anahtarı yoksa ya da `/ayarlar`'dan kapatılmışsa devre dışı kalırlar ve bot bunu söyler.
+Bot belirli aralıklarla e-Kampüs'e girer; ders sayfalarını, takvimi ve duyuruları okur. Okuduğu her şeyi bir önceki durumla karşılaştırır. Yeni ya da değişen her kayıt bir bildirime dönüşür ve Telegram'a iletilene kadar kuyrukta bekler.
 
-**Tarama:** Bot belirli aralıklarla e-Kampüs'e girer; ders sayfalarını, takvimi ve duyuruları okur. Okuduğu her şeyi bir önceki durumla karşılaştırır. Yeni ya da değişen her kayıt bir bildirime dönüşür ve Telegram'a iletilene kadar kuyrukta bekler.
+Her yeni bulgu ayrıca JEV'e gider:
+- **Emin olduğunda:** JEV öne çıkan uyarıyı kendisi gönderir; uyarı kararı için LLM'e gidilmez.
+- **Kararsız kaldığında:** Kararı LLM verir; LLM gerekirse araçlarla bağlama bakar.
+- **Açıklama gerektiğinde:** LLM kısa bir açıklama yazar, asıl bildirimden sonra gelir.
+- **Önemsiz bulgularda:** Sadece normal bildirim gelir.
 
-**Yeni bulgular:** Her bulgu ayrıca karar katmanına gider.
-- JEV emin olduğunda öne çıkan uyarıyı kendisi gönderir.
-- Emin olmadığında ya da açıklama gerektiğinde kararı LLM'e bırakır.
+### Sohbet hattı: JEV bekçi
 
-Hangi bileşenin çalışacağı her bulguda yeniden seçilir:
-- JEV kapalıysa bulgular doğrudan LLM'e gider.
-- LLM kapalıysa JEV'in kararsız kaldığı bulgular kaçmasın diye uyarı olarak gider.
-- Pushover kapalıysa uyarılar Telegram'a gelir.
+```mermaid
+flowchart LR
+    U((Öğrenci)) -->|serbest metin| TG[Telegram]
+    TG -->|JEV'e uğramaz| A["LLM ajanı<br/>Grok / DeepSeek<br/>kalıcı hafıza"]
+    A -->|okuma, SQL| DB[(SQLite)]
+    A -->|ödev sayfası, PDF| S[e-Kampüs]
+    A -->|risksiz eylem| DO["Eylem yapılır<br/>ayar, hatırlatma,<br/>hafıza, dosya"]
+    A -->|riskli eylem| JA{"JEV<br/>eylem kontrolü"}
+    JA -->|öğrenci istedi| DO
+    JA -->|istenmedi ve riskli| ST["Durur<br/>ajan öğrenciye sorar"]
+    DO --> DB
+    A -->|cevap, dosyalar,<br/>Yapılanlar| TG
 
-**Sohbet:** Sohbete yazılan mesaj JEV'e uğramadan doğrudan LLM ajanına gider. Ajan üç tür araç kullanır:
-- **Okuma araçları:** Kayıtlara, ajandaya, hatırlatma takvimine, botun kendi durumuna ve (salt okunur SQL ile) veritabanına bakar.
-- **Site araçları:** Ödev sayfasını canlı açar, PDF'leri okur.
-- **Eylem araçları:** Sessiz modu, ayarları, hatırlatmaları ve hafızayı değiştirir; dosya ve bildirim gönderir.
+    classDef optional stroke-dasharray: 5 5
+    class A,JA optional
+```
 
-Riskli bir eylemden önce JEV'e sorulur: öğrenci bunu açıkça istedi mi? İstenmemiş riskli eylem yapılmaz.
+Sohbete yazılan mesaj doğrudan LLM ajanına gider. Ajan okuma araçlarıyla kayıtlara, hatırlatma takvimine, botun durumuna ve salt okunur SQL ile veritabanına bakar. Site araçlarıyla ödev sayfasını açar ve PDF okur. Eylem araçlarıyla ayarları, hatırlatmaları ve hafızayı değiştirir, dosya gönderir.
 
-Bulguları değerlendirirken site ve eylem araçları ajana verilmez. Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
+Risksiz eylemler hemen yapılır. Kapatma, susturma ya da silme gibi riskli bir eylemden önce JEV'e sorulur; öğrenci açıkça istemediyse eylem durur ve ajan ne istendiğini sorar. Her eylem cevabın altında "Yapılanlar" olarak listelenir.
+
+### JEV'in iki görevi
+
+| | Bulgu kararı | Eylem kontrolü |
+|---|---|---|
+| Ne zaman | Taramada her yeni ya da değişen bulgu | Ajan riskli bir eylem yapmadan hemen önce |
+| JEV'e giden | Bulgunun metni ve kodda hesaplanmış gerçekler (kalan saat, teslim durumu, tarih öne mi alındı) | Öğrencinin mesajı, son birkaç mesaj ve önerilen eylem |
+| Sorular | Teslim gerektiriyor mu, sınavla mı ilgili, tarih değişikliği mi, eylem gerekli mi, açıklama işe yarar mı, hemen uyarılsın mı | Öğrenci bunu açıkça istedi mi, eylem riskli mi |
+| Karar (kodda) | Uyarı olasılığı %80 ve üstü: uyarı. %30-80: LLM'e sor. %30 ve altı: uyarı yok. Açıklama olasılığı %60 ve üstü: LLM açıklar. | İstendi %60 ve üstü: yapılır. İstendiği belli değilse sadece risk %25'in altındaysa yapılır, yoksa durur. |
+| JEV kapalıysa | Bulgular doğrudan LLM'e gider | Kontrol yapılmaz, eylem yapılır |
+| LLM kapalıysa | Kararsız bulgular kaçmasın diye uyarı olarak gider | Sohbet ajanı da kapalıdır |
+
+Bulgu kararındaki eşikler `.env`'den ayarlanır (`JEV_PUSH_HIGH`, `JEV_PUSH_LOW`, `JEV_EXPLAIN_MIN`). Kararların hepsi `/llmlog`'da olasılıklarıyla birlikte görünür.
+
+**Kesik çerçeveli bileşenler isteğe bağlıdır:** JEV, LLM ve Pushover anahtarı yoksa ya da `/ayarlar`'dan kapatılmışsa devre dışı kalır ve bot bunu söyler. Pushover kapalıysa uyarılar Telegram'a gelir.
+
+**Bulgu hattında ajanın eylem ve site araçları yoktur.** Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
 
 Yanlış alarm vermemek için algılama temkinli çalışır:
 - İlk kurulumda var olan kayıtlar bildirilmez.
