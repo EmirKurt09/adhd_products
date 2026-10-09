@@ -29,6 +29,7 @@ GROUPS = {
     "ekampus": ("EKAMPUS_USERNAME", "EKAMPUS_PASSWORD"),
     "telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_CHAT_ID"),
     "llm": ("LLM_API_KEY",),
+    "pushover": ("PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY"),  # isteğe bağlı: sistem uyarıları kanalı
 }
 
 
@@ -98,6 +99,17 @@ class Settings:
     data_dir: Path
     headless: bool
     llm_history_messages: int = 20
+    pushover_app_token: str = field(default="", repr=False)
+    pushover_user_key: str = field(default="", repr=False)
+    error_spike_per_hour: int = 5
+
+    @property
+    def pushover_enabled(self) -> bool:
+        return bool(self.pushover_app_token and self.pushover_user_key)
+
+    @property
+    def watchdog_marker_path(self) -> Path:
+        return self.data_dir / "watchdog_exit"
 
     @property
     def session_path(self) -> Path:
@@ -130,6 +142,8 @@ class Settings:
             "TELEGRAM_BOT_TOKEN": self.telegram_token,
             "TELEGRAM_OWNER_CHAT_ID": self.telegram_owner_chat_id,
             "LLM_API_KEY": self.llm_api_key,
+            "PUSHOVER_APP_TOKEN": self.pushover_app_token,
+            "PUSHOVER_USER_KEY": self.pushover_user_key,
         }
         return [name for name in GROUPS[group] if not values[name]]
 
@@ -200,4 +214,7 @@ def load_settings() -> Settings:
         data_dir=data_dir,
         headless=_bool("HEADLESS", True),
         llm_history_messages=max(0, _int("LLM_HISTORY_MESSAGES", 20)),
+        pushover_app_token=_env("PUSHOVER_APP_TOKEN"),
+        pushover_user_key=_env("PUSHOVER_USER_KEY"),
+        error_spike_per_hour=max(1, _int("ERROR_SPIKE_PER_HOUR", 5)),
     )
