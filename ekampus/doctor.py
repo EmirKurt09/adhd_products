@@ -44,6 +44,7 @@ async def run(settings: Settings) -> int:
     await _check_telegram(settings, add)
     await _check_llm(settings, add)
     await _check_pushover(settings, add)
+    await _check_jev(settings, add)
 
     failed = [r for r in results if r[0] == FAIL]
     print()
@@ -151,3 +152,22 @@ async def _check_pushover(settings: Settings, add) -> None:
         add(FAIL, "Pushover", f"erişilemiyor: {type(e).__name__}: {e}")
         return
     add(OK, "Pushover", f"anahtarlar geçerli, cihazlar: {devices}")
+
+
+async def _check_jev(settings: Settings, add) -> None:
+    if not settings.typesafe_api_key:
+        add(SKIP, "JEV", "ayarlı değil; bulgulara Grok karar verir")
+        return
+    from .jev import JevClient, JevError
+
+    probe = {"probe": {"type": "noul", "instructions": "Does `text` ask the student to submit or upload something?"}}
+    try:
+        decision = await JevClient(settings.typesafe_api_key, settings.jev_model).ask(
+            {"text": "Ödev 3 raporunu cuma 23:59'a kadar PDF olarak yükleyin."}, probe)
+    except JevError as e:
+        add(FAIL, "JEV", str(e)[:200])
+        return
+    except Exception as e:  # noqa: BLE001 - doctor her hatayı raporlamalı
+        add(FAIL, "JEV", f"erişilemiyor: {type(e).__name__}: {e}")
+        return
+    add(OK, "JEV", f"{decision.model} erişilebilir; Türkçe deneme sorusu (teslim istiyor mu?): %{round(decision.p('probe') * 100)}")

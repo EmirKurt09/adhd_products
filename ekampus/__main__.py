@@ -189,6 +189,66 @@ def _enqueue_sample_assignment(settings: Settings) -> int:
     return 0
 
 
+def _jev_samples(now):
+    """Kalibrasyon için Türkçe örnek bulgular (gerçek ve sahte karışık); hiçbiri kaydedilmez."""
+    from datetime import timedelta
+
+    from .models import Event
+
+    def due(hours):
+        return (now + timedelta(hours=hours)).isoformat(timespec="minutes")
+
+    def assignment(uid, title, hours, body, submitted=False, etype="new", old=None):
+        data = {"kind": "assignment", "uid": uid, "title": title, "course": "Computer Networks", "due_at": due(hours),
+                "body": body, "meta": {"submitted": submitted}}
+        if old is not None:
+            data["old_due_at"] = due(old)
+        return Event(etype, f"{etype}:assignment:{uid}", data)
+
+    return [
+        ("5 saat kalan, teslim edilmemiş ödev", assignment("s1", "Lab Raporu 2", 5,
+            "Deney sonuçlarını PDF rapor olarak yükleyin. Geç teslim kabul edilmez.")),
+        ("10 gün kalan uzun ödev (Cisco)", assignment("s2", "Homework 4 - Cisco Certificate (Açıklamayı okuyun)", 240,
+            "Cisco NetAcad üzerinden Introduction to Networks modülünü tamamlayın. Sertifikanın ekran görüntüsünü ve "
+            "modül sonu sınav sonucunu tek bir PDF içinde yükleyin. Sertifikada adınız ve öğrenci numaranız görünmeli.")),
+        ("6 saat kalan ama teslim edilmiş ödev", assignment("s3", "Homework 3", 6, "PDF yükleyin.", submitted=True)),
+        ("Teslim tarihi öne alındı", assignment("s4", "Ödev 1", 30, "Aliasing hatasını giderin.", etype="due_changed", old=120)),
+        ("Vize tarihi değişikliği duyurusu", Event("new", "new:announcement:s5", {"kind": "announcement", "uid": "s5",
+            "title": "Vize sınavı tarih değişikliği", "course": "Computer Networks",
+            "body": "BIL441 vize sınavı 14 Kasım yerine 7 Kasım Cuma 10:00'da B-204'te yapılacaktır. Hesap makinesi getirmeyiniz."})),
+        ("Rutin duyuru", Event("new", "new:announcement:s6", {"kind": "announcement", "uid": "s6",
+            "title": "Ders notları", "course": "Sistem Programlama", "body": "Bu haftanın ders notları sisteme yüklenmiştir."})),
+        ("Sıradan materyal", Event("new", "new:file:s7", {"kind": "file", "uid": "s7", "title": "lecture 5",
+            "course": "Computer Networks", "extra": {"section": "Genel", "type": "pdf"}})),
+        ("Not girildi", Event("new", "new:grade:s8", {"kind": "grade", "uid": "s8", "title": "Homework-2",
+            "course": "Computer Networks", "extra": {"value": "99,00"}})),
+    ]
+
+
+async def _jev_test(settings: Settings) -> int:
+    from datetime import datetime, timezone
+
+    from .jev import build_state, make_jev
+    from .router import decide
+
+    jev = make_jev(settings)
+    if jev is None:
+        print("TYPESAFE_API_KEY yok: önce .env'e yaz.")
+        return 1
+    now = datetime.now(timezone.utc)
+    print(f"Eşikler: uyarı ≥ %{round(settings.jev_push_high * 100)}, Grok'a sor > %{round(settings.jev_push_low * 100)}, "
+          f"açıklama ≥ %{round(settings.jev_explain_min * 100)}")
+    for label, event in _jev_samples(now):
+        decision = await jev.ask(build_state(event, None, now))
+        route = decide(decision, settings)
+        push = {"send": "UYARI GÖNDER", "ask_llm": "Grok'a sor", "none": "uyarı yok"}[route.push]
+        print(f"\n{label}")
+        print("  " + " · ".join(f"{qid} %{round(p * 100)}" for qid, p in decision.probs.items()))
+        print(f"  → {push} | açıklama: {'evet' if route.explain else 'hayır'} | etiketler: {', '.join(decision.labels) or '-'}")
+    print(f"\nModel: {decision.model}")
+    return 0
+
+
 def _health(settings: Settings) -> int:
     """Konteyner sağlık kontrolü: bot döngüsü heartbeat dosyasını düzenli güncellemeli."""
     try:
@@ -223,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                       help="mesaj: düz deneme mesajı; odev: [TEST] başlıklı yeni ödev bildirimi (bot üzerinden); "
                            "pushover: Pushover'a deneme uyarısı")
     sub.add_parser("bot", help="Telegram botunu ve izlemeyi başlat (sürekli çalışır)")
+    sub.add_parser("jev-test", help="örnek bulgularla JEV kararlarını göster (hiçbir şey göndermez)")
     sub.add_parser("health", help="konteyner sağlık kontrolü")
     args = parser.parse_args(argv)
 
@@ -248,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_login(settings, args.headed, args.force))
         if args.cmd == "explore":
             return asyncio.run(_explore(settings, args.max_pages))
+        if args.cmd == "jev-test":
+            return asyncio.run(_jev_test(settings))
         if args.cmd == "check":
             return asyncio.run(_check(settings, args.dry_run))
         if args.cmd == "setup-telegram":
