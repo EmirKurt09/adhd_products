@@ -7,6 +7,7 @@ Telegram'dan bağımsızdır: mesajı gönderen fonksiyon dışarıdan verilir. 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -43,6 +44,8 @@ TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024
 
 Sender = Callable[[Message, dict], Awaitable[None]]
 AlertChannel = Callable[[str, int], Awaitable[None]]  # (metin, öncelik) → sistem uyarısı kanalı (Pushover)
+FindingsHook = Callable[[list[Event]], Awaitable[None]]
+FINDING_TYPES = {"new", "due_changed", "changed", "scope_added"}  # LLM'in değerlendireceği bulgular
 
 
 @dataclass
@@ -52,6 +55,7 @@ class ScanOutcome:
     error: str = ""
     anomalies: list[str] = field(default_factory=list)
     duration_s: float = 0.0
+    findings: list[Event] = field(default_factory=list)  # yeni bulgular (LLM değerlendirmesi için)
 
 
 def utcnow() -> datetime:
@@ -67,6 +71,8 @@ class Engine:
         self.s = settings
         self.store = store
         self.alert_channel = alert_channel  # verilirse sistem uyarıları buraya gider; olmazsa Telegram'a
+        self.on_findings: FindingsHook | None = None  # her taramadaki yeni bulgular (ör. LLM değerlendirmesi)
+        self._background: set[asyncio.Task] = set()
         self.lock = asyncio.Lock()        # site erişimi tek sıra: tarama ve istek üzerine açılan sayfalar
         self.flush_lock = asyncio.Lock()  # iki gönderici aynı bekleyen olayı iki kez yollamasın
 
@@ -87,6 +93,22 @@ class Engine:
 
     # ── Tarama turu ───────────────────────────────────────────────────────
     async def run_scan(self, reason: str = "zamanlanmış") -> ScanOutcome:
+        outcome = await self._run_scan_locked(reason)
+        if outcome.findings and self.on_findings is not None:
+            # Arka planda: değerlendirme (LLM) taramayı ve normal bildirimleri asla bekletmez
+            task = asyncio.get_running_loop().create_task(self._dispatch_findings(outcome.findings))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+        return outcome
+
+    async def _dispatch_findings(self, findings: list[Event]) -> None:
+        try:
+            await self.on_findings(findings)
+        except Exception as e:  # noqa: BLE001 - değerlendirme hatası sadece kaydedilir
+            log.warning("Bulgu değerlendirmesi başarısız: %s", e)
+            self.record_error("llm", f"olay değerlendirme: {type(e).__name__}: {e}")
+
+    async def _run_scan_locked(self, reason: str) -> ScanOutcome:
         async with self.lock:
             started = utcnow()
             try:
@@ -116,7 +138,8 @@ class Engine:
             log.info("Tarama tamam (%s): %d kayıt, %d olay, tam=%s", reason, len(scan.items), len(result.events), scan.complete)
             self.touch()
             return ScanOutcome(True, len(result.events), anomalies=result.anomalies,
-                               duration_s=(now - started).total_seconds())
+                               duration_s=(now - started).total_seconds(),
+                               findings=[e for e in result.events if e.type in FINDING_TYPES])
 
     def _failure(self, started: datetime, error: str, count: bool = True, now: datetime | None = None) -> ScanOutcome:
         now = now or utcnow()
@@ -238,6 +261,38 @@ class Engine:
                        "<b>Bot beklenmedik şekilde kapanmıştı</b> ve yeniden başladı." + alive, now,
                        urgent=False, priority=2)
         self.store.set("running", "1")
+
+    # ── Sahibine öne çıkan uyarı (LLM'in soyut "notify_owner" aracının arkası) ──
+    def _assistant_key(self, now: datetime) -> str:
+        return f"assistant_alerts:{now.astimezone(self.s.tz).date().isoformat()}"
+
+    def notify_quota(self, now: datetime | None = None) -> int:
+        """Bugün kalan uyarı hakkı; kullanıcı "Asistan uyarıları"nı kapattıysa 0."""
+        now = now or utcnow()
+        if not PR.load(self.store).get("assistant", True):
+            return 0
+        return max(0, self.s.llm_alerts_per_day - int(self.store.get(self._assistant_key(now), "0")))
+
+    def notify_owner(self, title: str, message: str, reason: str = "", now: datetime | None = None) -> dict:
+        """Uyarıyı kuyruğa koyar; kanal (Pushover/Telegram) ve öncelik burada belirlenir, çağırana söylenmez."""
+        now = now or utcnow()
+        title = " ".join(str(title or "").split())[:80]
+        message = str(message or "").strip()[:600]
+        if not title or not message:
+            return {"durum": "gönderilmedi", "neden": "başlık ve mesaj gerekli"}
+        left = self.notify_quota(now)
+        if left <= 0:
+            return {"durum": "gönderilmedi", "neden": "bugünkü uyarı hakkı doldu ya da kullanıcı bu uyarıları kapattı"}
+        digest = hashlib.sha1(f"{title}|{message}".encode()).hexdigest()[:12]
+        day = now.astimezone(self.s.tz).date().isoformat()
+        text = f"<b>Asistan: {_esc(title)}</b>\n{_esc(message)}"
+        payload = {"text": text, "urgent": True, "critical": False, "priority": 1, "category": "assistant",
+                   "reason": str(reason or "")[:300]}
+        if not self.store.enqueue(Event("alert", f"alert:assistant:{day}:{digest}", payload), now):
+            return {"durum": "gönderilmedi", "neden": "aynı uyarı bugün zaten gönderildi"}
+        used = int(self.store.get(self._assistant_key(now), "0")) + 1
+        self.store.set(self._assistant_key(now), str(used))
+        return {"durum": "gönderildi", "bugün_kalan_hak": max(0, self.s.llm_alerts_per_day - used)}
 
     def on_clean_exit(self) -> None:
         self.store.set("running", "0")
