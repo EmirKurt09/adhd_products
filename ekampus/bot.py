@@ -755,7 +755,10 @@ def build_app(settings: Settings) -> Application:
     store = Store(settings.db_path)
     pushover = make_pushover(settings)
     engine = Engine(settings, store, alert_channel=pushover.send if pushover else None)
-    app.bot_data["ctx"] = Ctx(settings, store, engine, make_assistant(settings, store))
+    assistant = make_assistant(settings, store, notifier=engine)  # LLM uyarıyı soyut arayüzle ister
+    if assistant is not None:
+        engine.on_findings = assistant.triage  # olay güdümlü: her yeni bulguda LLM karar verir
+    app.bot_data["ctx"] = Ctx(settings, store, engine, assistant)
     owner = owner_filter(settings.telegram_owner_chat_id)
 
     for names, handler in [
