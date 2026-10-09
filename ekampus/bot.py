@@ -700,7 +700,8 @@ async def on_stranger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = (f"<b>Bota yetkisiz erişim denemesi</b>\nKim: {_who(user, chat)}\n"
             + (f"Yazdığı: <i>{escape(M.clip(said, 120))}</i>\n" if said else "")
             + "Hiçbir cevap verilmedi. Aynı kişi bugün tekrar yazarsa bildirmeyeceğim.")
-    c.engine.alert(f"stranger:{who_id}:{now.astimezone(c.s.tz).date().isoformat()}", text, now, urgent=False)
+    c.engine.alert(f"stranger:{who_id}:{now.astimezone(c.s.tz).date().isoformat()}", text, now, urgent=False,
+                   priority=1)
     await flush_job(context)
 
 
@@ -720,7 +721,8 @@ async def on_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if c is not None:
             now = now_utc()
             c.engine.alert(f"group:{chat.id}", f"<b>Bot bir gruba eklendi ve hemen çıktı.</b>\nGrup: "
-                           f"{escape(chat.title or str(chat.id))}\nEkleyen: {_who(member.from_user, chat)}", now)
+                           f"{escape(chat.title or str(chat.id))}\nEkleyen: {_who(member.from_user, chat)}", now,
+                           priority=1)
             await flush_job(context)
 
 

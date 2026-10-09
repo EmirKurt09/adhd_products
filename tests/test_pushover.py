@@ -47,10 +47,14 @@ def test_send_payload():
     assert seen[0]["_url"].endswith("/1/messages.json")
 
 
-def test_priority_is_clamped_no_emergency():
+def test_emergency_priority_repeats_until_acknowledged():
     p, seen = mock()
-    p.send_sync("x", priority=2)  # 2 (acil) onay gerektirir; kullanılmaz
-    assert seen[0]["priority"] == "1"
+    p.send_sync("x", priority=2)
+    p.send_sync("x", priority=5)   # 2'den büyükler acile kısılır
+    p.send_sync("x", priority=1)
+    assert (seen[0]["priority"], seen[0]["retry"], seen[0]["expire"]) == ("2", "300", "3600")
+    assert seen[1]["priority"] == "2"
+    assert seen[2]["priority"] == "1" and "retry" not in seen[2]
 
 
 @pytest.mark.parametrize("status_code,body", [(400, {"status": 0, "errors": ["application token is invalid"]}),
@@ -179,3 +183,51 @@ def test_heartbeat_age(tmp_path):
     hb.write_text("x")
     mtime = hb.stat().st_mtime
     assert heartbeat_age(hb, now=mtime + 700) == pytest.approx(700)
+
+
+# ── Öncelik tablosu (kullanıcının istediği ayar) ──────────────────────────────
+
+def priorities(engine) -> dict[str, int]:
+    out = {}
+    for key, payload in engine.store.db.execute("SELECT key, payload FROM outbox WHERE type = 'alert'"):
+        out[key.split(":")[1]] = __import__("json").loads(payload)["priority"]
+    return out
+
+
+def test_priority_table(settings):
+    from ekampus import prefs as PR
+    from ekampus.browser import LoginRejected
+
+    engine = make_engine(settings)
+    while PR.load(engine.store)["fail_after"] != 1:
+        PR.toggle(engine.store, "fail_after")
+    engine._failure(DAY, "timeout", now=DAY)                     # siteye girilemiyor
+    engine.store.set("fail_since", (DAY - timedelta(hours=1)).isoformat())
+    engine.store.db.execute("UPDATE outbox SET status = 'sent'")  # uyarı gitmiş olsun ki düzelme bildirilsin
+    engine._recovered(DAY + timedelta(minutes=30))               # yeniden ulaşılıyor
+    engine._auth_alert(LoginRejected("şifre yanlış"))            # giriş reddi
+    engine._track_parse_errors({"course:1": "yapı yok"}, DAY)
+    engine._track_parse_errors({"course:1": "yapı yok"}, DAY)    # 2. kez: yapı değişti uyarısı
+    engine._track_anomalies(["düştü"], DAY)
+    engine._track_anomalies(["düştü"], DAY)                      # 2. kez: anomali uyarısı
+    for i in range(5):
+        engine.record_error("bot", "x", DAY + timedelta(minutes=i))  # hata artışı
+    engine.on_start(DAY)
+    engine.on_start(DAY + timedelta(hours=1))                    # çökme
+    settings.watchdog_marker_path.write_text("x", encoding="utf-8")
+    engine.on_start(DAY + timedelta(hours=2))                    # takılma sonrası yeniden başladı
+    assert priorities(engine) == {
+        "fail": 1, "recovered": 0, "auth": 2, "parse": 1, "anomaly": 1, "spike": 2, "crash": 2, "restart": 1,
+    }
+
+
+def test_watchdog_alert_is_high_priority(settings, monkeypatch):
+    from ekampus import watchdog
+
+    p, seen = mock()
+    monkeypatch.setattr(watchdog.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    monkeypatch.setattr(watchdog.logging, "shutdown", lambda: None)
+    with pytest.raises(SystemExit) as exit_info:
+        watchdog._restart(settings, p, 700)
+    assert exit_info.value.code == watchdog.EXIT_CODE
+    assert seen[0]["priority"] == "1" and settings.watchdog_marker_path.exists()

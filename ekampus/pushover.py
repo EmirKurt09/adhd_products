@@ -15,6 +15,9 @@ API_URL = "https://api.pushover.net/1/messages.json"
 VALIDATE_URL = "https://api.pushover.net/1/users/validate.json"
 TITLE = "e-Kampüs asistanı"
 MAX_MESSAGE = 1024
+# Acil (2) öncelik: onaylanana kadar her EMERGENCY_RETRY_S saniyede bir tekrar çalar, en fazla EMERGENCY_EXPIRE_S
+EMERGENCY_RETRY_S = 300
+EMERGENCY_EXPIRE_S = 3600
 _ALLOWED = {"b", "i", "u", "font", "a"}
 
 
@@ -43,8 +46,12 @@ class Pushover:
         self._async_transport = async_transport
 
     def _payload(self, text: str, priority: int, url: str | None, url_title: str | None) -> dict:
+        priority = max(-2, min(2, priority))
         data = {"token": self._token, "user": self._user, "title": TITLE, "message": to_pushover_html(text) or "-",
-                "html": "1", "priority": str(max(-2, min(1, priority)))}
+                "html": "1", "priority": str(priority)}
+        if priority == 2:
+            data["retry"] = str(EMERGENCY_RETRY_S)
+            data["expire"] = str(EMERGENCY_EXPIRE_S)
         if url:
             data["url"] = url
             data["url_title"] = url_title or "Aç"

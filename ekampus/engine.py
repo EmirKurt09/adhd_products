@@ -137,7 +137,7 @@ class Engine:
                 if last_ok:
                     lines.append(f"Son başarılı kontrol: {fmt_dt(datetime.fromisoformat(last_ok), self.s.tz, now)}")
                 lines.append("Denemeye devam ediyorum, düzelince haber vereceğim.")
-                self.alert(f"fail:{since}", "\n".join(lines), now, urgent=False)
+                self.alert(f"fail:{since}", "\n".join(lines), now, urgent=False, priority=1)
                 self.store.set("fail_alerted", "1")
         self.touch()
         return ScanOutcome(False, error=error, duration_s=(now - started).total_seconds())
@@ -152,7 +152,7 @@ class Engine:
                 minutes = int((now - datetime.fromisoformat(since)).total_seconds() // 60)
                 took = f"{minutes // 60} sa {minutes % 60} dk" if minutes >= 60 else f"{minutes} dk"
                 self.alert(f"recovered:{since}", f"<b>e-Kampüs'e yeniden ulaşılıyor</b> (kesinti ~{took}). "
-                            "Bu sürede gelenler varsa şimdi bildiriyorum.", now, urgent=False, priority=-1)
+                            "Bu sürede gelenler varsa şimdi bildiriyorum.", now, urgent=False, priority=0)
         self.store.set("fail_streak", "0")
         self.store.set("fail_alerted", "")
 
@@ -166,7 +166,7 @@ class Engine:
             text = (f"<b>e-Kampüs girişi reddedildi.</b>\n<i>{_esc(str(error)[:200])}</i>\n"
                     "Hesabın kilitlenmesin diye tekrar denemiyorum. Şifren değiştiyse .env'i güncelle "
                     "ve botu yeniden başlat ya da /girisdene yaz.")
-        self.alert(f"auth:{stamp}", text, utcnow(), critical=True, priority=1)
+        self.alert(f"auth:{stamp}", text, utcnow(), critical=True, priority=2)
 
     def _track_parse_errors(self, errors: dict[str, str], now: datetime) -> None:
         streaks: dict[str, int] = json.loads(self.store.get("parse_streaks", "{}"))
@@ -179,7 +179,7 @@ class Engine:
                 else:
                     text = (f"<b>{_esc(scope)} sayfasının yapısı değişmiş görünüyor.</b>\n"
                             f"<i>{_esc(errors[scope][:200])}</i>\nO bölüm düzelene kadar eksik izlenebilir.")
-                self.alert(f"parse:{scope}:{now.date().isoformat()}", text, now)
+                self.alert(f"parse:{scope}:{now.date().isoformat()}", text, now, priority=1)
         self.store.set("parse_streaks", json.dumps(streaks))
 
     def _track_anomalies(self, anomalies: list[str], now: datetime) -> None:
@@ -187,12 +187,13 @@ class Engine:
         self.store.set("anomaly_streak", str(streak))
         if streak == ANOMALY_ALERT_AFTER:
             self.alert(f"anomaly:{now.date().isoformat()}", "<b>Sitede beklenmedik bir azalma var.</b>\n"
-                        + _esc("; ".join(anomalies)[:400]) + "\nHiçbir şeyi silinmiş saymıyorum; durum düzelince normale döner.", now)
+                        + _esc("; ".join(anomalies)[:400]) + "\nHiçbir şeyi silinmiş saymıyorum; durum düzelince normale döner.", now,
+                       priority=1)
 
     def alert(self, key: str, text: str, now: datetime, *, urgent: bool = True, critical: bool = False,
               priority: int = 0) -> None:
         """urgent: gece/sessiz modda da gönder. critical: uyarı yöneticisinden kapatılamaz (giriş sorunları).
-        priority: Pushover önceliği (-1 sessiz, 0 normal, 1 yüksek)."""
+        priority: Pushover önceliği (-1 sessiz, 0 normal, 1 yüksek, 2 acil: onaylanana kadar tekrar çalar)."""
         payload = {"text": text, "urgent": urgent, "critical": critical, "priority": priority}
         self.store.enqueue(Event("alert", f"alert:{key}", payload), now)
 
@@ -215,7 +216,7 @@ class Engine:
         lines = [f"<b>Hata artışı:</b> son 1 saatte {len(errors)} hata"]
         lines += [f"• {_esc(src)}: {n}" for src, n in sorted(counts.items(), key=lambda kv: -kv[1])]
         lines.append(f"Son hata ({_esc(source)}): <i>{_esc(message[:200])}</i>")
-        self.alert(f"spike:{now.isoformat(timespec='minutes')}", "\n".join(lines), now, urgent=False, priority=1)
+        self.alert(f"spike:{now.isoformat(timespec='minutes')}", "\n".join(lines), now, urgent=False, priority=2)
         self.store.set("spike_alerted_at", now.isoformat())
 
     def on_start(self, now: datetime | None = None) -> None:
@@ -230,11 +231,12 @@ class Engine:
         if marker.exists():
             marker.unlink(missing_ok=True)
             self.alert(f"restart:{now.isoformat(timespec='seconds')}",
-                       "<b>Bot takıldığı için yeniden başlatıldı</b> ve tekrar çalışıyor." + alive, now, urgent=False)
+                       "<b>Bot takıldığı için yeniden başlatıldı</b> ve tekrar çalışıyor." + alive, now, urgent=False,
+                       priority=1)
         elif self.store.get("running") == "1":
             self.alert(f"crash:{now.isoformat(timespec='seconds')}",
                        "<b>Bot beklenmedik şekilde kapanmıştı</b> ve yeniden başladı." + alive, now,
-                       urgent=False, priority=1)
+                       urgent=False, priority=2)
         self.store.set("running", "1")
 
     def on_clean_exit(self) -> None:

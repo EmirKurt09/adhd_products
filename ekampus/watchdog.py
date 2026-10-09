@@ -56,7 +56,7 @@ def _restart(settings: Settings, pushover: Pushover | None, age: float) -> None:
         pass
     if pushover is not None:
         try:
-            pushover.send_sync(text, priority=0)
+            pushover.send_sync(text, priority=1)
         except Exception as e:  # noqa: BLE001 - kapanmayı hiçbir şey engellememeli
             log.error("Pushover'a takılma bildirilemedi: %s", e)
     logging.shutdown()
