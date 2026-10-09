@@ -10,7 +10,7 @@ import pytest
 
 from ekampus import prefs as PR
 from ekampus.engine import Engine, ScanOutcome
-from ekampus.llm import TOOLS, Assistant, notify_tool
+from ekampus.llm import Assistant, notify_tool
 from ekampus.models import Event
 from ekampus.store import Store
 
@@ -76,7 +76,7 @@ def test_tool_is_abstract():
 
 def test_tool_offered_only_when_usable(settings):
     engine, assistant = make(settings)
-    names = lambda: [t["function"]["name"] for t in assistant.tools(TOOLS) or []]  # noqa: E731
+    names = lambda: [t["function"]["name"] for t in assistant.toolbox.specs("chat") or []]  # noqa: E731
     assert "notify_owner" in names()
     PR.toggle(engine.store, "assistant")                 # kullanıcı kapattı
     assert "notify_owner" not in names()
@@ -85,7 +85,7 @@ def test_tool_offered_only_when_usable(settings):
         engine.notify_owner(f"t{i}", "m")
     assert "notify_owner" not in names()
     no_channel = Assistant(replace(settings, llm_api_key="test"), engine.store)
-    assert "notify_owner" not in [t["function"]["name"] for t in no_channel.tools(TOOLS)]
+    assert "notify_owner" not in [t["function"]["name"] for t in no_channel.toolbox.specs("chat") or []]
 
 
 def test_notify_owner_queues_high_priority_escaped_and_deduped(settings):
@@ -119,7 +119,9 @@ def test_triage_decides_to_alert_and_keys_never_reach_llm(secret_settings):
 
     everything = "\n".join(sent)
     assert SECRET_TOKEN not in everything and SECRET_USER not in everything  # anahtarlar modele hiç gitmedi
-    assert "pushover" not in everything.lower()
+    # Ajan /ayarlar'daki "Pushover" özelliğini adıyla bilir ama uyarı aracı kanaldan bağımsızdır
+    notify_spec = next(t for t in json.loads(sent[0])["tools"] if t["function"]["name"] == "notify_owner")
+    assert "pushover" not in json.dumps(notify_spec, ensure_ascii=False).lower()
     tool_results = [m for m in json.loads(sent[1])["messages"] if m["role"] == "tool"]
     assert json.loads(tool_results[0]["content"]) == {"durum": "gönderildi", "bugün_kalan_hak": 2}  # sadece durum döner
     assert "Homework 5" in sent[0] and "<bulgular>" in sent[0]

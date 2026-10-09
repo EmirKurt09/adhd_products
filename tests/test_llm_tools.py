@@ -10,7 +10,7 @@ import pytest
 
 from ekampus import messages as M
 from ekampus.detect import diff
-from ekampus.llm import TOOLS, Assistant
+from ekampus.llm import Assistant
 from ekampus.models import Item, Scan
 from ekampus.store import Store
 
@@ -33,7 +33,7 @@ def assistant(settings) -> Assistant:
 
 def test_tools_are_declared_for_every_handler(settings):
     a = assistant(settings)
-    for tool in TOOLS:
+    for tool in a.toolbox.specs("triage"):
         name = tool["function"]["name"]
         args = {"days": 7} if name == "agenda" else {"text": "ödev"} if name == "search" else \
             {"kind": "assignment", "uid": "1"} if name == "get_item" else {}
@@ -171,3 +171,29 @@ def test_history_can_be_disabled(settings):
     asyncio.run(a.answer("birinci"))
     asyncio.run(a.answer("ikinci"))
     assert [m["role"] for m in sent[1]] == ["system", "user"]
+
+
+# ── Botun kendi durumu ────────────────────────────────────────────────────────
+
+def test_bot_state_and_recent_notifications(settings):
+    from ekampus.engine import Engine
+    from ekampus.models import Event
+    from ekampus.agent import Toolbox
+
+    engine = Engine(settings, Store(":memory:"))
+    now = datetime.now(timezone.utc)
+    engine.set_mute(now + timedelta(hours=3), allow_urgent=False)
+    engine.schedule_note("raporu yükle", now + timedelta(days=1), now)
+    engine.store.memory_add("Ağlar'ı bıraktı", now)
+    engine.store.enqueue(Event("new", "new:announcement:1", {"kind": "announcement", "uid": "1", "title": "Vize yeri"}), now)
+    engine.store.mark_sent(engine.store.outbox_by_key("new:announcement:1")["id"], now)
+    box = Toolbox(settings, engine.store, engine=engine)
+
+    state = box.run_read("bot_state", {})
+    assert state["özellikler"]["JEV karar katmanı"] == "çalışmıyor: .env'de TYPESAFE_API_KEY yok"
+    assert state["sessiz_mod"]["seviye"] == "tam sessiz" and state["sessiz_mod"]["kalan"].startswith("2 sa")
+    assert state["bildirim_türleri"]["Duyurular"] == "açık"
+    assert state["kişisel_hatırlatma_sayısı"] == 1 and state["hafıza_not_sayısı"] == 1
+    assert box.run_read("recent_notifications", {})[0] == {"zaman": M.fmt_dt(now, settings.tz), "tür": "Yeni duyuru",
+                                                            "başlık": "Vize yeri"}
+    assert box.run_read("list_reminders", {})[0]["metin"] == "raporu yükle"

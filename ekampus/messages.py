@@ -490,19 +490,23 @@ def notes_view(notes: list[dict], tz: ZoneInfo, now: datetime) -> Message:
     return Message("\n".join(lines), buttons)
 
 
+def history_entry(row) -> tuple[str, str]:
+    """Gönderilmiş bir bildirimin türü ve başlığı (düz metin)."""
+    payload = json.loads(row["payload"])
+    title = payload.get("title") or re.sub(r"<[^>]+>", "", payload.get("text", "")).split("\n")[0]
+    if row["type"] == "baseline":
+        return "İzleme başladı", ""
+    if row["type"] == "new":
+        return f"Yeni {KIND_LABEL.get(payload.get('kind', ''), 'kayıt')}", title
+    return HISTORY_LABEL.get(row["type"], row["type"]), title
+
+
 def history_view(rows: list, tz: ZoneInfo, now: datetime) -> Message:
     lines = ["<b>Son bildirimler</b>"]
     if not rows:
         lines.append("\nHenüz bildirim gönderilmedi.")
     for row in rows:
-        payload = json.loads(row["payload"])
-        title = payload.get("title") or re.sub(r"<[^>]+>", "", payload.get("text", "")).split("\n")[0]
-        if row["type"] == "baseline":
-            label, title = "İzleme başladı", ""
-        elif row["type"] == "new":
-            label = f"Yeni {KIND_LABEL.get(payload.get('kind', ''), 'kayıt')}"
-        else:
-            label = HISTORY_LABEL.get(row["type"], row["type"])
+        label, title = history_entry(row)
         sent = datetime.fromisoformat(row["sent_at"]) if row["sent_at"] else None
         stamp = sent.astimezone(tz).strftime("%d.%m %H:%M") if sent else "?"
         lines.append(f"{stamp}  {label}" + (f": {escape(clip(title, 60))}" if title else ""))

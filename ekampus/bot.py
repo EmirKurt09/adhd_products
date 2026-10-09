@@ -834,7 +834,8 @@ def build_app(settings: Settings) -> Application:
     store = Store(settings.db_path)
     pushover = make_pushover(settings)
     engine = Engine(settings, store, alert_channel=pushover.send if pushover else None)
-    assistant = make_assistant(settings, store, notifier=engine)  # LLM uyarıyı soyut arayüzle ister
+    # LLM uyarıyı soyut arayüzle ister; ayarları ve hatırlatmaları araç kutusu üzerinden motorla yönetir
+    assistant = make_assistant(settings, store, notifier=engine, engine=engine)
     jev = make_jev(settings)
     if jev is not None or assistant is not None:
         # Her bulguda: JEV açıksa öncü hızlı karar, kararsızsa Grok; JEV kapalıysa doğrudan Grok.
