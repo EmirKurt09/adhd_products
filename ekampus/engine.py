@@ -42,6 +42,7 @@ GROUPABLE = {"new", "changed", "due_changed"}
 TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024
 
 Sender = Callable[[Message, dict], Awaitable[None]]
+AlertChannel = Callable[[str, int], Awaitable[None]]  # (metin, öncelik) → sistem uyarısı kanalı (Pushover)
 
 
 @dataclass
@@ -62,9 +63,10 @@ def in_window(now_local: time, start: time, end: time) -> bool:
 
 
 class Engine:
-    def __init__(self, settings: Settings, store: Store):
+    def __init__(self, settings: Settings, store: Store, alert_channel: AlertChannel | None = None):
         self.s = settings
         self.store = store
+        self.alert_channel = alert_channel  # verilirse sistem uyarıları buraya gider; olmazsa Telegram'a
         self.lock = asyncio.Lock()        # site erişimi tek sıra: tarama ve istek üzerine açılan sayfalar
         self.flush_lock = asyncio.Lock()  # iki gönderici aynı bekleyen olayı iki kez yollamasın
 
@@ -116,9 +118,10 @@ class Engine:
             return ScanOutcome(True, len(result.events), anomalies=result.anomalies,
                                duration_s=(now - started).total_seconds())
 
-    def _failure(self, started: datetime, error: str, count: bool = True) -> ScanOutcome:
-        now = utcnow()
+    def _failure(self, started: datetime, error: str, count: bool = True, now: datetime | None = None) -> ScanOutcome:
+        now = now or utcnow()
         log.warning("Tarama başarısız: %s", error)
+        self.record_error("tarama", error, now)
         self.store.set("last_scan", json.dumps({"at": now.isoformat(), "ok": False, "error": error}, ensure_ascii=False))
         if count:
             streak = int(self.store.get("fail_streak", "0")) + 1
@@ -149,7 +152,7 @@ class Engine:
                 minutes = int((now - datetime.fromisoformat(since)).total_seconds() // 60)
                 took = f"{minutes // 60} sa {minutes % 60} dk" if minutes >= 60 else f"{minutes} dk"
                 self.alert(f"recovered:{since}", f"<b>e-Kampüs'e yeniden ulaşılıyor</b> (kesinti ~{took}). "
-                            "Bu sürede gelenler varsa şimdi bildiriyorum.", now, urgent=False)
+                            "Bu sürede gelenler varsa şimdi bildiriyorum.", now, urgent=False, priority=-1)
         self.store.set("fail_streak", "0")
         self.store.set("fail_alerted", "")
 
@@ -163,7 +166,7 @@ class Engine:
             text = (f"<b>e-Kampüs girişi reddedildi.</b>\n<i>{_esc(str(error)[:200])}</i>\n"
                     "Hesabın kilitlenmesin diye tekrar denemiyorum. Şifren değiştiyse .env'i güncelle "
                     "ve botu yeniden başlat ya da /girisdene yaz.")
-        self.alert(f"auth:{stamp}", text, utcnow(), critical=True)
+        self.alert(f"auth:{stamp}", text, utcnow(), critical=True, priority=1)
 
     def _track_parse_errors(self, errors: dict[str, str], now: datetime) -> None:
         streaks: dict[str, int] = json.loads(self.store.get("parse_streaks", "{}"))
@@ -186,9 +189,56 @@ class Engine:
             self.alert(f"anomaly:{now.date().isoformat()}", "<b>Sitede beklenmedik bir azalma var.</b>\n"
                         + _esc("; ".join(anomalies)[:400]) + "\nHiçbir şeyi silinmiş saymıyorum; durum düzelince normale döner.", now)
 
-    def alert(self, key: str, text: str, now: datetime, *, urgent: bool = True, critical: bool = False) -> None:
-        """urgent: gece/sessiz modda da gönder. critical: uyarı yöneticisinden kapatılamaz (giriş sorunları)."""
-        self.store.enqueue(Event("alert", f"alert:{key}", {"text": text, "urgent": urgent, "critical": critical}), now)
+    def alert(self, key: str, text: str, now: datetime, *, urgent: bool = True, critical: bool = False,
+              priority: int = 0) -> None:
+        """urgent: gece/sessiz modda da gönder. critical: uyarı yöneticisinden kapatılamaz (giriş sorunları).
+        priority: Pushover önceliği (-1 sessiz, 0 normal, 1 yüksek)."""
+        payload = {"text": text, "urgent": urgent, "critical": critical, "priority": priority}
+        self.store.enqueue(Event("alert", f"alert:{key}", payload), now)
+
+    # ── Hata artışı ve çökme takibi ───────────────────────────────────────
+    def record_error(self, source: str, message: str, now: datetime | None = None) -> None:
+        """Her hatayı kaydeder; son 1 saatte ERROR_SPIKE_PER_HOUR kadar birikirse (saatte en fazla bir) uyarır."""
+        now = now or utcnow()
+        cutoff = now - timedelta(hours=1)
+        errors = [e for e in json.loads(self.store.get("errors", "[]")) if datetime.fromisoformat(e[0]) > cutoff]
+        errors.append([now.isoformat(), source, message[:200]])
+        self.store.set("errors", json.dumps(errors[-100:], ensure_ascii=False))
+        if len(errors) < self.s.error_spike_per_hour:
+            return
+        last = self.store.get("spike_alerted_at")
+        if last and now - datetime.fromisoformat(last) < timedelta(hours=1):
+            return
+        counts = defaultdict(int)
+        for _, src, _ in errors:
+            counts[src] += 1
+        lines = [f"<b>Hata artışı:</b> son 1 saatte {len(errors)} hata"]
+        lines += [f"• {_esc(src)}: {n}" for src, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+        lines.append(f"Son hata ({_esc(source)}): <i>{_esc(message[:200])}</i>")
+        self.alert(f"spike:{now.isoformat(timespec='minutes')}", "\n".join(lines), now, urgent=False, priority=1)
+        self.store.set("spike_alerted_at", now.isoformat())
+
+    def on_start(self, now: datetime | None = None) -> None:
+        """Önceki çalışma düzgün kapanmadıysa (çökme, bellek dolması, takılma) haber ver."""
+        now = now or utcnow()
+        try:
+            last_alive = datetime.fromtimestamp(self.s.heartbeat_path.stat().st_mtime, timezone.utc)
+        except OSError:
+            last_alive = None
+        alive = f"\nSon canlılık işareti: {fmt_dt(last_alive, self.s.tz, now)}" if last_alive else ""
+        marker = self.s.watchdog_marker_path
+        if marker.exists():
+            marker.unlink(missing_ok=True)
+            self.alert(f"restart:{now.isoformat(timespec='seconds')}",
+                       "<b>Bot takıldığı için yeniden başlatıldı</b> ve tekrar çalışıyor." + alive, now, urgent=False)
+        elif self.store.get("running") == "1":
+            self.alert(f"crash:{now.isoformat(timespec='seconds')}",
+                       "<b>Bot beklenmedik şekilde kapanmıştı</b> ve yeniden başladı." + alive, now,
+                       urgent=False, priority=1)
+        self.store.set("running", "1")
+
+    def on_clean_exit(self) -> None:
+        self.store.set("running", "0")
 
     def touch(self) -> None:
         try:
@@ -261,9 +311,23 @@ class Engine:
                     sent += len(members)
         for row, payload in singles:
             message = render_event(row["type"], payload, self.s.tz, now)
-            if await self._deliver(send, message, {"type": row["type"], **payload}, [row], now):
+            sender = self._alert_sender(send) if row["type"] == "alert" else send
+            if await self._deliver(sender, message, {"type": row["type"], **payload}, [row], now):
                 sent += 1
         return sent
+
+    def _alert_sender(self, telegram: Sender) -> Sender:
+        """Sistem uyarısı: önce Pushover; gönderilemezse kaybolmasın diye Telegram'a düş."""
+        async def send(message: Message, context: dict) -> None:
+            if self.alert_channel is not None:
+                try:
+                    await self.alert_channel(message.text, int(context.get("priority", 0)))
+                    return
+                except Exception as e:  # noqa: BLE001 - kanal hatası Telegram'a düşülerek tolere edilir
+                    log.warning("Pushover'a gönderilemedi, Telegram'a düşülüyor: %s", e)
+                    self.record_error("pushover", f"{type(e).__name__}: {e}")
+            await telegram(message, context)
+        return send
 
     async def _deliver(self, send: Sender, message: Message, context: dict, rows: list, now: datetime) -> bool:
         try:
@@ -272,6 +336,7 @@ class Engine:
             log.warning("Bildirim gönderilemedi (%s): %s", context.get("type"), e)
             for row in rows:
                 self.store.mark_failed(row["id"], f"{type(e).__name__}: {e}", now)
+            self.record_error("gönderim", f"{context.get('type')}: {type(e).__name__}: {e}", now)
             return False
         for row in rows:
             self.store.mark_sent(row["id"], now)

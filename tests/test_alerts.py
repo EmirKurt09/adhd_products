@@ -69,17 +69,17 @@ def test_access_failure_alert_after_threshold_with_reason(engine):
     PR.toggle(engine.store, "fail_after")
     PR.toggle(engine.store, "fail_after")  # → 1
     engine.store.set("last_ok_at", (DAY - timedelta(hours=1)).isoformat())
-    engine._failure(DAY, "FetchError: /Course: HTTP 503")
+    engine._failure(DAY, "FetchError: /Course: HTTP 503", now=DAY)
     texts = sent_texts(engine, DAY)
     assert len(texts) == 1
     assert "girilemiyor" in texts[0] and "sunucu hatası" in texts[0] and "Son başarılı kontrol" in texts[0]
-    engine._failure(DAY, "FetchError: /Course: HTTP 503")
+    engine._failure(DAY, "FetchError: /Course: HTTP 503", now=DAY)
     assert sent_texts(engine, DAY + timedelta(minutes=5)) == []  # aynı kesinti için tek uyarı
 
 
 def test_recovery_reports_downtime(engine):
-    engine._failure(DAY, "timeout")
-    engine._failure(DAY, "timeout")
+    engine._failure(DAY, "timeout", now=DAY)
+    engine._failure(DAY, "timeout", now=DAY)
     assert len(sent_texts(engine, DAY)) == 1
     engine.store.set("fail_since", (DAY - timedelta(minutes=50)).isoformat())
     engine.store.db.execute("UPDATE outbox SET key = ? WHERE type = 'alert'", (f"alert:fail:{engine.store.get('fail_since')}",))
@@ -89,8 +89,8 @@ def test_recovery_reports_downtime(engine):
 
 
 def test_night_outage_that_recovers_before_morning_is_silent(engine):
-    engine._failure(NIGHT, "timeout")
-    engine._failure(NIGHT, "timeout")
+    engine._failure(NIGHT, "timeout", now=NIGHT)
+    engine._failure(NIGHT, "timeout", now=NIGHT)
     assert sent_texts(engine, NIGHT) == []        # gece bekletildi
     engine._recovered(NIGHT + timedelta(hours=1))  # sabahtan önce düzeldi
     assert sent_texts(engine, DAY) == []           # hiç rahatsız etme

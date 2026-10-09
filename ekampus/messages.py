@@ -397,6 +397,8 @@ def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, st
     if status.get("parse_problems"):
         lines.append("Okunamayan bölüm: " + escape(", ".join(status["parse_problems"])))
     lines.append(f"Bildirim: son 24 saatte {status.get('sent_24h', 0)}, bekleyen {status.get('pending', 0)}")
+    if status.get("alert_channel"):
+        lines.append(f"Sistem uyarıları: {escape(status['alert_channel'])}")
     muted = status.get("muted_until")
     if muted and muted > now:
         lines.append(f"Sessiz: {fmt_dt(muted, tz, now)} kadar (acil olanlar yine gelir)")
