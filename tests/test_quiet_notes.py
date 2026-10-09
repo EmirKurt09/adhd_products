@@ -62,8 +62,8 @@ def test_turning_quiet_off_resets_level(settings):
 def test_note_waits_for_its_time(settings):
     engine = make(settings)
     at = DAY + timedelta(hours=3)
-    note_id = engine.schedule_note("Ağlar raporunu yükle", at, DAY)
-    assert note_id is not None and engine.schedule_note("Ağlar raporunu yükle", at, DAY) is None  # tekrar girmez
+    note_id, new = engine.schedule_note("Ağlar raporunu yükle", at, DAY)
+    assert new and engine.schedule_note("Ağlar raporunu yükle", at, DAY) == (note_id, False)  # tekrar girmez
     assert flush(engine) == []
     assert engine.store.outbox_stats()["pending"] == 0  # kurulmuş hatırlatma "bekleyen bildirim" sayılmaz
     assert [n["text"] for n in engine.store.notes_pending()] == ["Ağlar raporunu yükle"]
@@ -81,7 +81,7 @@ def test_note_ignores_category_toggles_and_normal_quiet(settings):
 
 def test_cancelled_note_is_not_sent(settings):
     engine = make(settings)
-    note_id = engine.schedule_note("x", DAY + timedelta(hours=1), DAY)
+    note_id, _ = engine.schedule_note("x", DAY + timedelta(hours=1), DAY)
     assert engine.store.cancel_note(note_id) and not engine.store.cancel_note(note_id)
     assert flush(engine, DAY + timedelta(hours=2)) == []
 

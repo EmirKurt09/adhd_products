@@ -225,3 +225,26 @@ def test_chat_without_actions_has_no_footer(box, settings):
     a.client, _ = scripted(_response(tool_calls=[_Call("c1", "bot_state", {})]), _response(content="Her şey açık."))
     reply = asyncio.run(a.chat("durum ne?"))
     assert reply.text == "Her şey açık." and reply.actions == [] and not reply.flush
+
+
+def test_model_written_action_list_is_replaced_by_code(box, settings):
+    a = agent(box, settings)
+    a.client, _ = scripted(
+        _response(tool_calls=[_Call("c1", "end_quiet", {})]),
+        _response(content="Sessiz modu kapattım.\n\nYapılanlar:\n• Sessiz mod kapatıldı"),  # geçmişi taklit ediyor
+    )
+    reply = asyncio.run(a.chat("sessizi kapat"))
+    assert reply.text == "Sessiz modu kapattım.\n\nYapılanlar:\n• Sessiz mod kapatıldı"
+    a.client, _ = scripted(_response(content="Yapılanlar:\n• Bot durumu gösterildi"))  # eylem yokken uydurma liste
+    assert asyncio.run(a.chat("durum?")).text == ""
+
+
+def test_duplicate_reminder_call_counts_once(box, settings):
+    a = agent(box, settings)
+    args = {"at": local(settings, timedelta(days=1)), "text": "raporu yükle"}
+    a.client, sent = scripted(_response(tool_calls=[_Call("c1", "remind_me", args), _Call("c2", "remind_me", args)]),
+                              _response(content="Kurdum."))
+    reply = asyncio.run(a.chat("yarın hatırlat"))
+    results = [json.loads(m["content"]) for m in sent[1]["messages"] if m["role"] == "tool"]
+    assert results[0] == results[1] and results[0]["durum"] == "tamam"  # model "zaten kuruluydu" sanmasın
+    assert reply.text.count("Hatırlatma kuruldu") == 1 and len(box.store.notes_pending()) == 1

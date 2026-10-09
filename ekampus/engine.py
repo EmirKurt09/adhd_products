@@ -311,15 +311,15 @@ class Engine:
                    "course": data.get("course"), "text": text[:2000]}
         return self.store.enqueue(Event("explain", f"explain:{event.key}", payload), now or utcnow())
 
-    def schedule_note(self, text: str, at: datetime, now: datetime | None = None) -> int | None:
-        """Kişisel hatırlatma: outbox'a zamanı gelince gönderilmek üzere girer. Aynı saat ve metin tekrar girmez."""
+    def schedule_note(self, text: str, at: datetime, now: datetime | None = None) -> tuple[int, bool]:
+        """Kişisel hatırlatma: outbox'a zamanı gelince gönderilmek üzere girer.
+        (id, yeni mi); aynı saat ve metin zaten kuruluysa onun id'si döner, ikinci kez girmez."""
         now = now or utcnow()
         digest = hashlib.sha1(text.encode()).hexdigest()[:10]
         key = f"note:{at.astimezone(timezone.utc).isoformat(timespec='minutes')}:{digest}"
         payload = {"text": text, "at": at.astimezone(timezone.utc).isoformat(), "set_at": now.isoformat()}
-        if not self.store.enqueue(Event("note", key, payload), now, not_before=at):
-            return None
-        return self.store.outbox_by_key(key)["id"]
+        new = self.store.enqueue(Event("note", key, payload), now, not_before=at)
+        return self.store.outbox_by_key(key)["id"], new
 
     def on_clean_exit(self) -> None:
         self.store.set("running", "0")

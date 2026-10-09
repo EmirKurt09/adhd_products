@@ -398,10 +398,10 @@ class Toolbox:
             return {"hata": "en fazla 1 yıl sonrasına hatırlatma kurulabilir"}
         if len(self.store.notes_pending()) >= NOTES_MAX:
             return {"hata": f"en fazla {NOTES_MAX} hatırlatma kurulabilir; önce birini iptal et"}
-        note_id = engine.schedule_note(text, at, now)
-        if note_id is None:
-            return {"durum": "aynı hatırlatma zaten kurulu"}
-        turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {text}")
+        note_id, new = engine.schedule_note(text, at, now)
+        if new:
+            turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {text}")
+        # Aynısı zaten kuruluysa da sonuç aynıdır: o saatte hatırlatma gelecek
         return {"durum": "tamam", "id": note_id, "zaman": when(at, self.s.tz, now)}
 
     def _cancel_reminder(self, args: dict, turn: Turn) -> dict:
