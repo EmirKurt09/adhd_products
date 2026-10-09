@@ -36,7 +36,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__
+from . import __version__, features
 from . import messages as M
 from . import prefs as PR
 from .browser import AuthGuard
@@ -53,14 +53,15 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 KEYBOARD = ReplyKeyboardMarkup(
-    [["Bugün", "Ödevler"], ["Hafta", "Notlar", "Dosyalar"], ["Yenile", "Bildirimler", "Durum"]],
+    [["Bugün", "Ödevler", "Hafta"], ["Notlar", "Dosyalar", "Yenile"], ["Bildirimler", "Ayarlar", "Durum"]],
     resize_keyboard=True, is_persistent=True,
 )
 COMMANDS = [
     ("bugun", "Bugün ve yarın"), ("hafta", "Önümüzdeki 7 gün"), ("odevler", "Açık ödevler"),
     ("notlar", "Notlar"), ("duyurular", "Son duyurular"), ("dosyalar", "Ders materyalleri: ders seç, dosyayı al"),
     ("dersler", "Dersler ve ilerleme"), ("takvim", "30 günlük takvim"), ("yenile", "Siteyi şimdi kontrol et"),
-    ("bildirimler", "Uyarı yöneticisi: aç/kapa, sessiz, geçmiş"), ("durum", "Sistem durumu"),
+    ("bildirimler", "Uyarı yöneticisi: aç/kapa, sessiz, geçmiş"),
+    ("ayarlar", "Özellikler: LLM, JEV, Pushover aç/kapa"), ("durum", "Sistem durumu"),
     ("sessiz", "Bildirimleri beklet: /sessiz 2s"), ("unut", "Sohbet geçmişini sil"),
     ("llmlog", "LLM son cevapta neye baktı: /llmlog, /llmlog 3, /llmlog liste"),
     ("yardim", "Yardım"),
@@ -84,6 +85,21 @@ class Ctx:
     def llm_on(self) -> bool:
         """LLM anahtarı var ve /ayarlar'dan kapatılmamış (her kullanımda yeniden bakılır)."""
         return self.assistant is not None and self.engine.feature_on("llm")
+
+    def llm_off_reason(self) -> str | None:
+        """LLM çalışmıyorsa kullanıcıya söylenecek neden; çalışıyorsa None."""
+        if self.llm_on():
+            return None
+        st = features.state(self.s, self.store, "llm")
+        if self.assistant is None and not st.missing:
+            return "başlatılamadı (LLM ayarlarını kontrol et)"
+        return st.describe()
+
+
+def chat_mode(c: Ctx) -> str:
+    """Sohbete yazılan serbest metin nereye gider: LLM açıksa doğrudan ajana, değilse anahtar kelimelere.
+    JEV bu yolda hiç yoktur; JEV sadece taramadan gelen bulgulara karar verir."""
+    return "agent" if c.llm_on() else "keywords"
 
 
 def deps(context: ContextTypes.DEFAULT_TYPE) -> Ctx:
@@ -124,7 +140,7 @@ def now_utc() -> datetime:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     c = deps(context)
-    await update.effective_chat.send_message(M.help_text(c.assistant is not None), reply_markup=KEYBOARD)
+    await update.effective_chat.send_message(M.help_text(c.llm_off_reason()), reply_markup=KEYBOARD)
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -264,11 +280,19 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append(f"Sessiz: {M.fmt_dt(c.engine.muted_until(), c.s.tz, now)} kadar")
     elif hold == "gece":
         lines.append("Gece modu: acil olmayanlar sabah gelir")
-    if c.assistant:
+    lines.append("\n<b>Özellikler</b>")
+    lines += M.features_lines(features.states(c.s, c.store))
+    if c.llm_on():
         lines.append(f"LLM: {escape(c.s.llm_provider)} · bugün kalan bütçe {max(0, c.assistant.budget_left())} token")
-    else:
-        lines.append("LLM: kapalı (.env'e LLM_API_KEY ekleyince açılır)")
     await reply(update, M.Message("\n".join(lines)))
+
+
+def settings_message(c: Ctx) -> M.Message:
+    return M.settings_view(features.states(c.s, c.store))
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await reply(update, settings_message(deps(context)))
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -328,7 +352,8 @@ async def cmd_llmlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     arg = " ".join(context.args or []).strip().lower()
     total = c.store.llm_log_count()
     if not total:
-        hint = "" if c.assistant else " LLM şu an kapalı (.env'de LLM_API_KEY yok)."
+        reason = c.llm_off_reason()
+        hint = f" LLM şu an {reason}." if reason else ""
         await reply(update, M.Message("Henüz LLM kaydı yok. Bota normal cümleyle bir soru sorunca burada görünür." + hint))
         return
     if arg in ("liste", "list", "hepsi"):
@@ -394,14 +419,14 @@ async def _edit(query, message: M.Message) -> None:
 BUTTON_ROUTES = {
     "Bugün": cmd_today, "Ödevler": cmd_assignments, "Hafta": cmd_week,
     "Notlar": cmd_grades, "Yenile": cmd_refresh, "Durum": cmd_status, "Bildirimler": cmd_manager,
-    "Dosyalar": cmd_files,
+    "Dosyalar": cmd_files, "Ayarlar": cmd_settings,
 }
 KEYWORD_ROUTES = [
     (("ödev", "odev", "teslim"), cmd_assignments), (("bugün", "bugun", "yarın", "yarin"), cmd_today),
     (("hafta",), cmd_week), (("not",), cmd_grades), (("duyuru",), cmd_announcements),
     (("dosya", "materyal", "pdf", "slayt"), cmd_files), (("ders",), cmd_courses),
     (("takvim", "sınav", "sinav", "vize", "final"), cmd_calendar), (("yenile", "kontrol"), cmd_refresh),
-    (("durum",), cmd_status), (("bildirim", "uyarı", "uyari", "alarm"), cmd_manager),
+    (("durum",), cmd_status), (("bildirim", "uyarı", "uyari", "alarm"), cmd_manager), (("ayar",), cmd_settings),
 ]
 
 
@@ -412,13 +437,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if text in BUTTON_ROUTES:
         await BUTTON_ROUTES[text](update, context)
         return
-    if not c.llm_on():
+    if chat_mode(c) == "keywords":
         low = text.casefold()
         for words, handler in KEYWORD_ROUTES:
             if any(w in low for w in words):
                 await handler(update, context)
                 return
-        await cmd_help(update, context)
+        await cmd_help(update, context)  # yardım metni LLM'in neden çalışmadığını da söyler
         return
     await update.effective_chat.send_action(ChatAction.TYPING)
     try:
@@ -460,6 +485,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         state = f"{prefs[arg]} hatada" if arg == "fail_after" else ("açık" if prefs.get(arg) else "kapalı")
         await query.answer(f"{label}: {state}")
         await _edit(query, manager_message(c))
+    elif action == "feat":
+        st = features.state(c.s, c.store, arg) if arg in features.LABELS else None
+        if st is None:
+            await query.answer()
+        elif st.missing:
+            await query.answer(f"{st.label} çalışamaz: .env'de {', '.join(st.missing)} yok", show_alert=True)
+        else:
+            PR.toggle(c.store, arg)
+            await query.answer(f"{st.label}: {M.on_off(not st.enabled)}")
+            await _edit(query, settings_message(c))
+    elif action == "set":
+        await query.answer()
+        await _edit(query, settings_message(c))
     elif action == "mute":
         now = now_utc()
         until = None if arg == "off" else _next_morning(c, now) if arg == "morning" else now + timedelta(hours=int(arg))
@@ -777,7 +815,7 @@ def build_app(settings: Settings) -> Application:
         (("takvim",), cmd_calendar), (("odevler", "odev"), cmd_assignments), (("notlar",), cmd_grades),
         (("duyurular",), cmd_announcements), (("dosyalar",), cmd_files), (("dersler",), cmd_courses),
         (("durum",), cmd_status), (("yenile",), cmd_refresh), (("sessiz",), cmd_mute),
-        (("bildirimler", "uyarilar", "alarm"), cmd_manager),
+        (("bildirimler", "uyarilar", "alarm"), cmd_manager), (("ayarlar", "ozellikler"), cmd_settings),
         (("girisdene",), cmd_retry_login), (("unut",), cmd_forget), (("llmlog",), cmd_llmlog),
     ]:
         app.add_handler(CommandHandler(list(names), handler, filters=owner))
@@ -805,11 +843,18 @@ async def _post_init(app: Application) -> None:
                                   scope=BotCommandScopeChat(ctx.s.telegram_owner_chat_id))
     ctx.engine.on_start()  # önceki çalışma çöktüyse ya da takıldıysa uyarı kuyruğa girer
     last = M.parse_dt(ctx.store.get("start_notice_at"))
-    if last is None or utcnow() - last > timedelta(hours=12):
+    missing = features.unavailable(ctx.s, ctx.store)
+    signature = ",".join(st.key for st in missing)
+    # Çalışmayan özellikler değiştiyse (anahtar eklendi ya da silindi) 12 saati beklemeden söyle
+    if last is None or utcnow() - last > timedelta(hours=12) or signature != ctx.store.get("start_notice_missing", ""):
+        text = "e-Kampüs asistanı çalışıyor. /yardim"
+        if missing:
+            text += "\n\nÇalışmayan özellikler:\n" + "\n".join(M.features_lines(missing))
         try:
-            await app.bot.send_message(ctx.s.telegram_owner_chat_id, "e-Kampüs asistanı çalışıyor. /yardim",
-                                       reply_markup=KEYBOARD, disable_notification=True)
+            await app.bot.send_message(ctx.s.telegram_owner_chat_id, text, reply_markup=KEYBOARD,
+                                       disable_notification=True)
             ctx.store.set("start_notice_at", utcnow().isoformat())
+            ctx.store.set("start_notice_missing", signature)
         except TelegramError as e:
             log.warning("Başlangıç mesajı gönderilemedi: %s", e)
 
@@ -834,8 +879,8 @@ def run(settings: Settings) -> int:
         app.post_shutdown = _post_shutdown
         if settings.telegram_owner_chat_id:
             start_watchdog(settings, make_pushover(settings))
-        log.info("Bot başlıyor (v%s, veri: %s, sistem uyarıları: %s)", __version__, settings.data_dir,
-                 "Pushover" if settings.pushover_enabled else "Telegram")
+        log.info("Bot başlıyor (v%s, veri: %s, %s)", __version__, settings.data_dir,
+                 ", ".join(f"{st.label}: {st.describe()}" for st in features.states(settings, None)))
         app.run_polling(allowed_updates=["message", "callback_query", "my_chat_member"])
     finally:
         lock.release()

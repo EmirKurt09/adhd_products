@@ -296,7 +296,8 @@ def agenda_view(rows: list[dict], tz: ZoneInfo, now: datetime, days: int, title:
     return Message("\n".join(lines))
 
 
-def help_text(llm_on: bool) -> str:
+def help_text(llm_off_reason: str | None = None) -> str:
+    """llm_off_reason: LLM çalışmıyorsa nedeni ("ayarlardan kapalı", "çalışmıyor: .env'de LLM_API_KEY yok")."""
     lines = [
         "<b>e-Kampüs asistanın</b>",
         "Yeni ödev, duyuru, not, materyal ve canlı dersleri buraya yazarım; teslimlerden önce hatırlatırım.",
@@ -311,18 +312,44 @@ def help_text(llm_on: bool) -> str:
         "/takvim — 30 günlük takvim",
         "/yenile — siteyi şimdi kontrol et",
         "/bildirimler — uyarı yöneticisi (aç/kapa, sessiz, geçmiş)",
+        "/ayarlar — LLM, JEV ve Pushover'ı aç/kapa",
         "/durum — sistem durumu",
         "/sessiz 2s — 2 saat acil olmayanları beklet (/sessiz kapat)",
         "",
     ]
-    if llm_on:
-        lines.append("Bana normal cümleyle de yazabilirsin: <i>“bu hafta neye odaklanayım?”</i>")
+    if llm_off_reason is None:
+        lines.append("Bana normal cümleyle de yazabilirsin: <i>“bu hafta neye odaklanayım?”</i>, "
+                     "<i>“cuma 18'e kadar rahatsız etme”</i>")
         lines.append("/llmlog — LLM son cevapta hangi veriye baktı (/llmlog liste, /llmlog 3)")
         lines.append("/unut — LLM sohbet geçmişini sil")
     else:
-        lines.append("Serbest soru için LLM bağlı değil; “ödev”, “bugün”, “not” gibi kelimeler yeter.")
+        hint = " → /ayarlar" if "ayarlardan" in llm_off_reason else ""
+        lines.append(f"LLM {escape(llm_off_reason, quote=False)}{hint}. Şimdilik “ödev”, “bugün”, “not” gibi kelimeler yeter.")
     lines.append("\nMateryaldeki “Gönder” butonu dosyayı sitede açar, yani içerik “görüldü” sayılır.")
     return "\n".join(lines)
+
+
+def features_lines(states: list) -> list[str]:
+    """Her özelliğin tek satırlık durumu: açık / ayarlardan kapalı / çalışmıyor: .env'de X yok."""
+    return [f"{escape(st.label, quote=False)}: {escape(st.describe(), quote=False)}" for st in states]
+
+
+def settings_view(states: list, memory_count: int | None = None, reminder_count: int | None = None) -> Message:
+    lines = ["<b>Ayarlar</b>", "", "<b>Özellikler</b>", *features_lines(states)]
+    if any(st.missing for st in states):
+        lines.append("\nAnahtarı olmayan özellik açılamaz; .env'e ekleyip botu yeniden başlat.")
+    lines.append("\nAçıp kapatmak için butona dokun.")
+    buttons = [[_btn(f"{st.label}: {'anahtar yok' if st.missing else on_off(st.enabled)}", f"feat:{st.key}")]
+               for st in states]
+    extra = []
+    if memory_count is not None:
+        extra.append(_btn(f"Hafıza ({memory_count})", "mem:list"))
+    if reminder_count is not None:
+        extra.append(_btn(f"Hatırlatmalarım ({reminder_count})", "rem:list"))
+    if extra:
+        buttons.append(extra)
+    buttons.append([_btn("Bildirim ayarları", "am:show"), _btn("Yenile", "set:show")])
+    return Message("\n".join(lines), buttons)
 
 
 def digest_view(rows: list[dict], fresh: dict[str, list], tz: ZoneInfo, now: datetime,

@@ -156,7 +156,11 @@ def test_no_decorative_emoji_anywhere(settings):
     from ekampus import prefs as PR
 
     tz = settings.tz
-    texts = [M.help_text(True), M.help_text(False)]
+    from ekampus import features as F
+
+    texts = [M.help_text(None), M.help_text("ayarlardan kapalı")]
+    view = M.settings_view(F.states(settings, None), memory_count=2, reminder_count=1)
+    texts += [view.text] + [b.text for row in view.buttons for b in row]
     for event_type, data in [
         ("new", {"kind": k, "uid": "1", "title": "x", "due_at": DUE, "url": "https://x", "extra": {"value": "1", "section": "s"}})
         for k in ("assignment", "announcement", "grade", "file", "live", "event")
