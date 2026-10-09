@@ -10,7 +10,8 @@ e-Kampüs yeni bir ödev, duyuru ya da not girildiğinde öğrenciye haber vermi
 - **Bildirim:** yeni ya da değişen her şey Telegram'a anında gelir; ödev ayrıntısı ve dosyalar mesajdaki butonlarla açılır.
 - **Hatırlatma:** teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce; her sabah günün özeti.
 - **Uyarı yöneticisi:** bildirim türlerini açıp kapatma, gece ve sessiz mod; siteye erişilemediğinde açıklamalı uyarı.
-- **LLM asistanı:** Grok ya da DeepSeek ile serbest soru, ödev özetleri ve günlük plan. Her yeni bulguyu değerlendirir; gerçekten acil ya da önemliyse telefonuna öne çıkan bir uyarı gönderir. `/llmlog` ile modelin neye bakıp neye karar verdiği görülebilir.
+- **Karar katmanı (JEV):** Her yeni bulgu önce TypeSafe JEV'e sorulur. JEV bulgunun teslim gerektirip gerektirmediğine, sınavla ya da tarih değişikliğiyle ilgili olup olmadığına bakar; uyarı gönderilmesi ve LLM'in açıklama yazması gerekip gerekmediğine karar verir. Emin olmadığı durumları LLM'e bırakır.
+- **LLM asistanı:** Grok ya da DeepSeek ile serbest soru, bulgu açıklamaları ve günlük plan. JEV kararsız kaldığında bağlama bakıp uyarı kararını verir. `/llmlog` ile JEV'in olasılıkları ve LLM'in neye bakıp ne dediği görülebilir.
 - **Sistem izleme:** çökme, takılma, hata artışı, siteye erişilememesi ve giriş sorunları Pushover'a bildirilir; takılan bot kendini yeniden başlatır.
 - **Güvenilirlik:** hiçbir bildirim kaybolmaz ya da iki kez gelmez.
 
@@ -122,7 +123,10 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `ERROR_SPIKE_PER_HOUR` | Bir saatte kaç hata birikince "hata artışı" uyarısı gelir | 5 |
 | `LLM_DAILY_TOKEN_BUDGET` | Günlük token sınırı | 200000 |
 | `LLM_HISTORY_MESSAGES` | Her soruda modele tekrar gönderilen son mesaj sayısı | 20 |
-| `LLM_ALERTS_PER_DAY` | LLM'in günde gönderebileceği öne çıkan uyarı sayısı (0 = kapalı) | 3 |
+| `LLM_ALERTS_PER_DAY` | Günde gönderilebilecek öne çıkan asistan uyarısı sayısı (0 = kapalı) | 3 |
+| `TYPESAFE_API_KEY` | JEV karar katmanı; boşsa kararları LLM verir | boş |
+| `JEV_PUSH_HIGH`, `JEV_PUSH_LOW` | JEV'in uyarıyı kendisi göndereceği ve kararı LLM'e bırakacağı olasılık sınırları | 0.8, 0.3 |
+| `JEV_EXPLAIN_MIN` | LLM'in açıklama yazması için gereken olasılık | 0.6 |
 | `POLL_INTERVAL_MIN`, `NIGHT_POLL_INTERVAL_MIN` | Gündüz ve gece kontrol aralığı (dakika) | 15, 60 |
 | `NIGHT_HOURS` | Acil olmayan bildirimlerin sabaha bekletildiği saatler | 01:00-07:00 |
 | `DAILY_DIGEST_TIME` | Sabah özetinin saati | 08:00 |
@@ -150,7 +154,7 @@ Komutların dışında bota normal cümleyle de yazılabilir. LLM bağlıysa sor
 - **Hesap güvenliği:** Şifre reddedilirse giriş tekrar denenmez, böylece hesap kilitlenmez.
 - **Tek kullanıcı:** Bot yalnızca sahibine cevap verir; başkalarının mesajlarını yanıtsız bırakır ve sahibine bildirir.
 - **Gizli bilgiler:** Şifre, token ve API anahtarı sadece `.env` dosyasında durur, repoya girmez.
-- **LLM:** Model yalnızca ödev, not ve takvim gibi ders verilerini görür; kimlik bilgilerine erişimi yoktur. Uyarı göndermesi soyut bir araçla olur: model hangi kanalın kullanıldığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
+- **LLM ve JEV:** İkisi de yalnızca ödev, not, duyuru ve takvim gibi ders verilerini görür; kimlik bilgilerine ve anahtarlara erişimleri yoktur. Bu veriler kullanılan LLM sağlayıcısına ve TypeSafe'e gider. Uyarı göndermesi soyut bir araçla olur: model hangi kanalın kullanıldığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
 
 ## Geliştirme
 
