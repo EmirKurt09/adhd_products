@@ -542,10 +542,13 @@ def llm_log_view(entry: dict, index: int, total: int, tz: ZoneInfo, now: datetim
     elif not steps:
         lines.append("\nAraç çağırmadı; sadece kendisine verilen metinle cevapladı.")
     else:
-        lines.append(f"\n<b>Baktığı veriler ({len(steps)} araç çağrısı)</b>")
+        writes = sum(1 for step in steps if step.get("writes"))
+        title = "Baktığı veriler ve yaptıkları" if writes else "Baktığı veriler"
+        lines.append(f"\n<b>{title} ({len(steps)} araç çağrısı)</b>")
         for i, step in enumerate(steps[:8], 1):
             count = f"{step['count']} kayıt, " if step.get("count") is not None else ""
-            lines.append(f"{i}. {escape(step['tool'])}({escape(_args_text(step.get('args')))}) → {count}{step.get('chars', 0)} karakter")
+            mark = "[eylem] " if step.get("writes") else ""
+            lines.append(f"{i}. {mark}{escape(step['tool'])}({escape(_args_text(step.get('args')))}) → {count}{step.get('chars', 0)} karakter")
             lines.append(f"<code>{escape(clip(step.get('preview', ''), 220))}</code>")
         if len(steps) > 8:
             lines.append(f"… ve {len(steps) - 8} çağrı daha (tamamı JSON'da)")

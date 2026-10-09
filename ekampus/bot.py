@@ -459,15 +459,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
         await cmd_help(update, context)  # yardım metni LLM'in neden çalışmadığını da söyler
         return
+    # Ajan: araçlarla bakar, gerekirse botu yönetir (sessiz mod, ayarlar, hatırlatma, hafıza, dosya)
     await update.effective_chat.send_action(ChatAction.TYPING)
     try:
-        answer = await asyncio.wait_for(c.assistant.answer(text), timeout=90)
+        result = await asyncio.wait_for(c.assistant.chat(text), timeout=120)
     except Exception as e:  # noqa: BLE001 - LLM hatası kullanıcıya düzgün söylenir, bot çalışmaya devam eder
         log.warning("LLM yanıtı alınamadı: %s", e)
         c.engine.record_error("llm", f"{type(e).__name__}: {e}")
         await reply(update, M.Message("Şu an LLM'e ulaşamadım. Komutlar çalışıyor: /odevler, /bugun, /notlar"))
         return
-    await reply(update, M.Message(escape(answer or "…")))
+    await reply(update, M.Message(escape(result.text or "…")))
+    for uid in result.files:
+        await send_material(update.effective_chat.id, uid, context)
+    if result.flush:  # sessiz mod kapandı ya da site yenilendi: bekleyenler hemen gelsin
+        await flush_job(context)
 
 
 # ── Butonlar ──────────────────────────────────────────────────────────────────

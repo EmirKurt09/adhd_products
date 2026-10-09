@@ -1,15 +1,19 @@
 """Ajanın yazma araçları: sessiz mod, ayarlar, ödev işareti, hafıza, hatırlatma, dosya, yenileme (ağ çağrısı yok)."""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
+from ekampus import messages as M
 from ekampus import prefs as PR
 from ekampus.agent import Toolbox, Turn, parse_local
 from ekampus.detect import diff
 from ekampus.engine import Engine, ScanOutcome
+from ekampus.llm import Assistant
 from ekampus.models import Item, Scan
 from ekampus.store import Store
 
@@ -144,3 +148,80 @@ def test_refresh_now_has_cooldown(box):
     result, turn = call(box, "refresh_now")
     assert result["yeni_olay"] == 2 and turn.flush and turn.actions == ["Site kontrol edildi: 2 yeni olay"]
     assert "hata" in call(box, "refresh_now")[0] and scans == ["asistan"]
+
+
+# ── Sohbet döngüsü: model aracı çağırır, kod "Yapılanlar"ı yazar ─────────────
+
+class _Call:
+    def __init__(self, call_id, name, args):
+        self.id = call_id
+        self.function = SimpleNamespace(name=name, arguments=json.dumps(args))
+
+    def model_dump(self):
+        return {"id": self.id, "type": "function", "function": {"name": self.function.name, "arguments": self.function.arguments}}
+
+
+def _response(content=None, tool_calls=None):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    return SimpleNamespace(usage=SimpleNamespace(total_tokens=50), choices=[SimpleNamespace(message=message)])
+
+
+def scripted(*responses):
+    queue, sent = list(responses), []
+
+    async def create(**kwargs):
+        sent.append({"messages": [dict(m) for m in kwargs["messages"]], "tools": kwargs.get("tools")})
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), sent
+
+
+def agent(box, settings) -> Assistant:
+    a = Assistant(replace(settings, llm_api_key="test"), box.store, engine=box.engine)
+    a._model = "test-model"
+    return a
+
+
+def test_chat_acts_and_reports_actions(box, settings):
+    a = agent(box, settings)
+    until = local(settings, timedelta(hours=6))
+    a.client, sent = scripted(
+        _response(tool_calls=[_Call("c1", "set_quiet", {"until": until}),
+                              _Call("c2", "remember", {"text": "Cuma günleri yarı zamanlı çalışıyor"})]),
+        _response(content="Tamam, akşama kadar rahatsız etmeyeceğim."),
+    )
+    reply = asyncio.run(a.chat("akşama kadar rahatsız etme, bu arada cuma günleri çalışıyorum"))
+    assert reply.text.startswith("Tamam, akşama kadar rahatsız etmeyeceğim.\n\nYapılanlar:\n• Sessiz mod:")
+    assert "• Hafızaya eklendi: Cuma günleri yarı zamanlı çalışıyor" in reply.text
+    assert box.engine.muted_until() is not None
+    assert "set_quiet" in {t["function"]["name"] for t in sent[0]["tools"]}
+    assert a.store.chat_recent(2)[-1]["content"] == reply.text  # model sonraki soruda ne yaptığını görür
+    entry = a.store.llm_log_at(0)
+    assert [s["writes"] for s in entry["steps"]] == [True, True]
+    assert "[eylem] set_quiet" in M.llm_log_view(entry, 0, 1, settings.tz, datetime.now(timezone.utc)).text
+
+
+def test_memory_reaches_every_prompt(box, settings):
+    box.store.memory_add("Ağlar dersini bıraktı", datetime.now(timezone.utc))
+    a = agent(box, settings)
+    a.client, sent = scripted(_response(content="Tamam."))
+    asyncio.run(a.chat("selam"))
+    system = sent[0]["messages"][0]["content"]
+    assert "#1 Ağlar dersini bıraktı" in system and "YYYY-MM-DD HH:MM" in system
+
+
+def test_actions_survive_a_failed_answer(box, settings):
+    a = agent(box, settings)
+    a.client, _ = scripted(_response(tool_calls=[_Call("c1", "send_file", {"uid": "1:0"})]), RuntimeError("koptu"))
+    reply = asyncio.run(a.chat("lecture 0'ı at"))
+    assert reply.files == ["1:0"] and reply.text.startswith("Cevabı tamamlayamadım ama istediklerini yaptım.")
+
+
+def test_chat_without_actions_has_no_footer(box, settings):
+    a = agent(box, settings)
+    a.client, _ = scripted(_response(tool_calls=[_Call("c1", "bot_state", {})]), _response(content="Her şey açık."))
+    reply = asyncio.run(a.chat("durum ne?"))
+    assert reply.text == "Her şey açık." and reply.actions == [] and not reply.flush
