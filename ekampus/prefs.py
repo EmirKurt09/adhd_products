@@ -53,6 +53,16 @@ def toggle(store: Store, key: str) -> dict:
     return prefs
 
 
+def set_value(store: Store, key: str, value: bool) -> dict:
+    """Aç/kapa ayarını doğrudan belirler (ajan "duyuruları kapat" dediğinde)."""
+    prefs = load(store)
+    if key not in DEFAULTS or key == "fail_after":
+        raise KeyError(key)
+    prefs[key] = bool(value)
+    save(store, prefs)
+    return prefs
+
+
 def category_of(event_type: str, payload: dict) -> str | None:
     """Bir bildirimin ait olduğu kategori. None: her zaman gönderilir (kurulum özeti, kritik uyarılar)."""
     if event_type in ("baseline", "scope_added", "note"):  # note: kullanıcının açıkça kurduğu hatırlatma
