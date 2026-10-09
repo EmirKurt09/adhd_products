@@ -44,7 +44,9 @@ from .config import Settings
 from .engine import Download, Engine, NotAFile, describe_failure, utcnow
 from .llm import Assistant, make_assistant
 from .lock import InstanceLock
+from .jev import make_jev
 from .pushover import make_pushover
+from .router import FindingRouter
 from .watchdog import start_watchdog
 from .store import Store
 
@@ -72,11 +74,13 @@ MAX_TEXT = 4000
 class Ctx:
     """bot_data içinde taşınan bağımlılıklar."""
 
-    def __init__(self, settings: Settings, store: Store, engine: Engine, assistant: Assistant | None):
+    def __init__(self, settings: Settings, store: Store, engine: Engine, assistant: Assistant | None,
+                 jev_active: bool = False):
         self.s = settings
         self.store = store
         self.engine = engine
         self.assistant = assistant
+        self.jev_active = jev_active  # JEV öncüyse açıklamaları o tetikler; ayrı ödev özeti gönderilmez
         self.last_refresh: datetime | None = None
 
 
@@ -619,7 +623,7 @@ async def flush_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async def deliver(message: M.Message, ctx: dict) -> None:
         sent = await send(context.bot, c.s.telegram_owner_chat_id, message)
-        if c.assistant and ctx.get("type") == "new" and ctx.get("kind") == "assignment":
+        if c.assistant and not c.jev_active and ctx.get("type") == "new" and ctx.get("kind") == "assignment":
             context.application.create_task(_tldr(context, c, ctx, sent.message_id))
 
     await c.engine.flush(deliver)
@@ -756,9 +760,13 @@ def build_app(settings: Settings) -> Application:
     pushover = make_pushover(settings)
     engine = Engine(settings, store, alert_channel=pushover.send if pushover else None)
     assistant = make_assistant(settings, store, notifier=engine)  # LLM uyarıyı soyut arayüzle ister
-    if assistant is not None:
-        engine.on_findings = assistant.triage  # olay güdümlü: her yeni bulguda LLM karar verir
-    app.bot_data["ctx"] = Ctx(settings, store, engine, assistant)
+    jev = make_jev(settings)
+    if jev is not None:
+        # Öncü JEV: her bulguda hızlı karar; kararsızsa ya da açıklama gerekiyorsa Grok devreye girer
+        engine.on_findings = FindingRouter(settings, engine, assistant, jev).route
+    elif assistant is not None:
+        engine.on_findings = assistant.triage  # JEV yoksa: her yeni bulguda Grok karar verir
+    app.bot_data["ctx"] = Ctx(settings, store, engine, assistant, jev_active=jev is not None)
     owner = owner_filter(settings.telegram_owner_chat_id)
 
     for names, handler in [
