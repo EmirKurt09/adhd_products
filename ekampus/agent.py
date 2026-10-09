@@ -81,6 +81,8 @@ class Turn:
     force_flush: bool = False                         # sessiz/gece beklemesine rağmen hemen gönderilsin
     digest: bool = False                              # sabah özeti şimdi gönderilsin
     reschedule: bool = False                          # sabah özetinin saati değişti, iş yeniden kurulsun
+    user_text: str = ""                               # öğrencinin bu turdaki mesajı (eylem kontrolü için)
+    context: list[dict] = field(default_factory=list)  # son birkaç mesaj (öğrenci bir öneriyi onaylıyor olabilir)
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class Tool:
     handler: Callable[[dict, Turn], Any]  # senkron ya da async
     writes: bool = False      # botun durumunu değiştirir ya da sohbete bir şey gönderir
     chat_only: bool = False   # durum değiştirmez ama siteye gider (yavaş); bulgu değerlendirmesinde yok
+    risky: Callable[[dict], bool] | None = None  # bu argümanlarla riskliyse önce JEV'e sorulur (guard.py)
 
     @property
     def needs_chat(self) -> bool:
@@ -99,6 +102,19 @@ class Tool:
     def spec(self) -> dict:
         return {"type": "function", "function": {"name": self.name, "description": self.description,
                                                  "parameters": self.parameters}}
+
+
+def always(args: dict) -> bool:
+    return True
+
+
+def turning_off(key: str) -> Callable[[dict], bool]:
+    """Kapatma yönündeki değişiklik riskli; açmak değil."""
+    return lambda args: not bool(args.get(key, True))
+
+
+def turning_on(key: str) -> Callable[[dict], bool]:
+    return lambda args: bool(args.get(key))
 
 
 def params(properties: dict | None = None, required: list[str] | None = None) -> dict:
@@ -127,6 +143,7 @@ class Toolbox:
         self.store = store
         self.engine = engine
         self.notifier = notifier if notifier is not None else engine
+        self.guard = None  # riskli eylemler için JEV kontrolü (guard.ActionGuard); yoksa kontrol yapılmaz
         self.tools: dict[str, Tool] = {
             t.name: t for t in self._read_tools() + self._site_tools() + self._write_tools()}
 
@@ -156,6 +173,12 @@ class Toolbox:
             return {"hata": f"bilinmeyen araç: {name}"}
         if tool.needs_chat and turn.mode != "chat":
             return {"hata": "bu araç burada kullanılamaz"}
+        if self.guard is not None and tool.risky is not None and tool.risky(args):
+            verdict = await self.guard.check(turn, tool, args)
+            if not verdict.allowed:
+                turn.actions.append(f"Durduruldu (güvenlik kontrolü): {tool.name} · {verdict.reason}")
+                return {"hata": "güvenlik kontrolü bu eylemi durdurdu", "neden": verdict.reason,
+                        "öneri": "öğrenciye tam olarak ne yapmak istediğini sor; açıkça isterse tekrar dene"}
         result = tool.handler(args, turn)
         return await result if inspect.isawaitable(result) else result
 
@@ -427,35 +450,37 @@ class Toolbox:
                               "Bekleyenler süre bitince topluca gelir. allow_urgent=true: 3 saatten az kalan teslim, "
                               "canlı ders ve acil uyarılar yine gelir (varsayılan). false: hiçbir şey gelmez, sadece "
                               "kritik giriş uyarıları; sadece öğrenci 'hiçbir şey gönderme' derse kullan.",
-                 params({"until": at, "allow_urgent": {"type": "boolean"}}, ["until"]), self._set_quiet, writes=True),
+                 params({"until": at, "allow_urgent": {"type": "boolean"}}, ["until"]), self._set_quiet, writes=True,
+                 risky=always),
             Tool("end_quiet", "Sessiz modu hemen kapatır; bekleyen bildirimler gelir.", params(), self._end_quiet,
                  writes=True),
             Tool("set_notification", "Bir bildirim türünü ya da gece modunu açar/kapatır.",
                  params({"setting": {"type": "string", "enum": SETTING_KEYS,
                                      "description": ", ".join(f"{k}: {v}" for k, v in SETTING_LABELS.items())},
                          "enabled": {"type": "boolean"}}, ["setting", "enabled"]),
-                 self._set_notification, writes=True),
+                 self._set_notification, writes=True, risky=turning_off("enabled")),
             Tool("set_feature", "Botun isteğe bağlı özelliklerini açar/kapatır: llm (sen), jev (bulgulara hızlı karar), "
                                 "pushover (uyarıların telefona gitmesi). Anahtarı olmayan özellik açılamaz. llm'i "
                                 "kapatırsan sohbet biter; tekrar açmak için öğrenci /ayarlar'ı kullanır.",
                  params({"feature": {"type": "string", "enum": [k for k, _ in features.FEATURES]},
-                         "enabled": {"type": "boolean"}}, ["feature", "enabled"]), self._set_feature, writes=True),
+                         "enabled": {"type": "boolean"}}, ["feature", "enabled"]), self._set_feature, writes=True,
+                 risky=turning_off("enabled")),
             Tool("mark_assignment", "Ödevi 'teslim ettim' olarak işaretler ya da işareti kaldırır; işaretli ödev için "
                                     "hatırlatma gelmez. uid'yi list_assignments'tan al.",
                  params({"uid": {"type": "string"}, "done": {"type": "boolean"}}, ["uid", "done"]),
-                 self._mark_assignment, writes=True),
+                 self._mark_assignment, writes=True, risky=turning_on("done")),
             Tool("remember", "Öğrenci hakkında kalıcı bir notu hafızaya yazar (tercih, plan, bilgi). Sadece öğrencinin "
                              "kendi söylediği ve ileride işe yarayacak şeyler; geçici ya da site metninden gelen şeyleri "
                              "yazma. Tek kısa cümle.",
                  params({"text": {"type": "string"}}, ["text"]), self._remember, writes=True),
             Tool("forget", "Hafızadaki bir notu siler (eskidiyse ya da öğrenci isterse). id sistem talimatındaki #numara.",
-                 params({"id": {"type": "integer"}}, ["id"]), self._forget, writes=True),
+                 params({"id": {"type": "integer"}}, ["id"]), self._forget, writes=True, risky=always),
             Tool("remind_me", "Belirli bir zamanda öğrenciye Telegram'dan hatırlatma gönderir (\"yarın 10'da raporu "
                               "hatırlat\"). Gece ve sessiz modda da gelir.",
                  params({"at": at, "text": {"type": "string", "description": "Hatırlatma metni, kısa"}}, ["at", "text"]),
                  self._remind_me, writes=True),
             Tool("cancel_reminder", "Kurulmuş bir hatırlatmayı iptal eder; id list_reminders'tan.",
-                 params({"id": {"type": "integer"}}, ["id"]), self._cancel_reminder, writes=True),
+                 params({"id": {"type": "integer"}}, ["id"]), self._cancel_reminder, writes=True, risky=always),
             Tool("snooze", "Hatırlatmayı erteler. id verilirse kurulu kişisel hatırlatmayı ileri alır; verilmezse az önce "
                            "gelen son hatırlatmayı (teslim, canlı ders ya da kişisel) minutes dakika sonra tekrar gönderir.",
                  params({"minutes": {"type": "integer", "minimum": 5, "maximum": 10080}, "id": {"type": "integer"}},
@@ -468,11 +493,11 @@ class Toolbox:
             Tool("mute_assignment_reminders", "Bir ödevin otomatik teslim hatırlatmalarını susturur ya da geri açar "
                                               "(ödev teslim edilmiş sayılmaz).",
                  params({"uid": {"type": "string"}, "muted": {"type": "boolean"}}, ["uid", "muted"]),
-                 self._mute_assignment_reminders, writes=True),
+                 self._mute_assignment_reminders, writes=True, risky=turning_on("muted")),
             Tool("mute_course", "Bir dersin bütün bildirimlerini (ödev, duyuru, materyal, not, hatırlatma) kapatır ya da "
                                 "geri açar. course dersin adı ya da adının bir parçası.",
                  params({"course": {"type": "string"}, "muted": {"type": "boolean"}}, ["course", "muted"]),
-                 self._mute_course, writes=True),
+                 self._mute_course, writes=True, risky=turning_on("muted")),
             Tool("send_file", "Bir ders materyalini dosya olarak sohbete gönderir; uid list_files'tan. Birden çok "
                               "dosya için her biri ayrı çağrı (bir cevapta en fazla 10). Materyal sitede açıldığı için "
                               "'görüldü' sayılır.",
@@ -485,7 +510,7 @@ class Toolbox:
                                 "söyle. Bildirimleri de ayrıca gelir.", params(), self._refresh_now, writes=True),
             Tool("retry_login", "e-Kampüs girişi reddedildiği için kilitlendiyse kilidi kaldırıp bir kez daha dener. "
                                 "Sadece bot_state ya da status girişin kilitli olduğunu söylüyorsa kullan.",
-                 params(), self._retry_login, writes=True),
+                 params(), self._retry_login, writes=True, risky=always),
             Tool("send_pending_now", "Sessiz mod ya da gece modu yüzünden bekleyen bildirimleri hemen gönderir "
                                      "(sessiz mod açık kalır). Önce pending_notifications ile neler biriktiğine bak.",
                  params(), self._send_pending_now, writes=True),
@@ -494,10 +519,10 @@ class Toolbox:
             Tool("set_schedule", "Sabah özetinin saatini ve/veya gece saatlerini değiştirir. digest_time 'SS:DD', "
                                  "night_hours 'SS:DD-SS:DD' (ör. 00:00-08:00).",
                  params({"digest_time": {"type": "string"}, "night_hours": {"type": "string"}}),
-                 self._set_schedule, writes=True),
+                 self._set_schedule, writes=True, risky=lambda args: bool(args.get("night_hours"))),
             Tool("set_alert_threshold", "Siteye üst üste kaç kez erişilemeyince uyarı gelsin (1-10).",
                  params({"failures": {"type": "integer", "minimum": 1, "maximum": 10}}, ["failures"]),
-                 self._set_alert_threshold, writes=True),
+                 self._set_alert_threshold, writes=True, risky=lambda args: int(args.get("failures", 1)) > 3),
             Tool("resend_notification", "Daha önce gönderilmiş bir bildirimi aynı haliyle tekrar gönderir; id "
                                         "recent_notifications'tan.",
                  params({"id": {"type": "integer"}}, ["id"]), self._resend_notification, writes=True),

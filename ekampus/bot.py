@@ -44,6 +44,7 @@ from .config import Settings
 from .engine import Download, Engine, NotAFile, describe_failure, utcnow
 from .llm import Assistant, make_assistant
 from .lock import InstanceLock
+from .guard import ActionGuard
 from .jev import make_jev
 from .pushover import make_pushover
 from .router import FindingRouter
@@ -921,6 +922,9 @@ def build_app(settings: Settings) -> Application:
         # Her bulguda: JEV açıksa öncü hızlı karar, kararsızsa Grok; JEV kapalıysa doğrudan Grok.
         # Hangisinin çalışacağına yönlendirici her seferinde /ayarlar'a bakarak karar verir.
         engine.on_findings = FindingRouter(settings, engine, assistant, jev).route
+    if assistant is not None and jev is not None:
+        # Ajanın riskli eylemlerinden önce JEV'e sorulur (döngüde insan yok); JEV kapalıysa kontrol atlanır
+        assistant.toolbox.guard = ActionGuard(jev, engine)
     app.bot_data["ctx"] = Ctx(settings, store, engine, assistant)
     owner = owner_filter(settings.telegram_owner_chat_id)
 

@@ -527,6 +527,7 @@ def _args_text(args: dict) -> str:
 DECISION_LABEL = {
     "requires_submission": "Teslim gerektiriyor", "exam_related": "Sınavla ilgili", "schedule_change": "Tarih değişikliği",
     "action_required": "Eylem gerekiyor", "needs_explanation": "Açıklama gerekli", "push_now": "Hemen uyar",
+    "explicitly_requested": "Öğrenci açıkça istedi", "risky": "Riskli",
 }
 
 

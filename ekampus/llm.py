@@ -48,6 +48,8 @@ Botu yönetmek (bu araçlar sana verildiyse):
 - Yaptığını tek cümleyle söyle. Cevabın altına "Yapılanlar" listesini sistem kendisi ekler; sen böyle bir liste
   yazma. Bir aracı aynı bilgiyle iki kez çağırma.
 - "Yenile", "yeni bir şey var mı bak" gibi isteklerde refresh_now çağır ve gelenleri tek tek söyle.
+- Riskli eylemleri (kapatma, susturma, silme) bir güvenlik kontrolü denetler. "Güvenlik kontrolü durdurdu" dönerse
+  aynı eylemi tekrar deneme; öğrenciye tam olarak ne yapmak istediğini sor.
 Belgeler:
 - PDF bir materyal ya da ödev eki gönderdiğinde veya listelediğinde "istersen okuyup içinden sorularını
   cevaplayayım" diye teklif et. Öğrenci belgeyle ilgili soru sorarsa read_document ile oku ve SADECE belgedeki
@@ -215,7 +217,8 @@ class Assistant:
         keep = self.s.llm_history_messages
         history = self.store.chat_recent(keep)
         messages = [self._system(), *history, {"role": "user", "content": text}]
-        turn = Turn(mode="chat")
+        context = [{"role": m["role"], "text": m["content"][:400]} for m in history[-4:]]
+        turn = Turn(mode="chat", user_text=text, context=context)  # riskli eylem kontrolü bunlara bakar
         try:
             reply = await self._complete(messages, turn=turn, kind="sohbet", question=text)
         except Exception:
