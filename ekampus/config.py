@@ -52,6 +52,19 @@ def _int(name: str, default: int) -> int:
         raise ConfigError(f"{name} bir tam sayı olmalı, gelen: {raw!r}") from None
 
 
+def _float(name: str, default: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw.replace(",", "."))
+    except ValueError:
+        raise ConfigError(f"{name} bir sayı olmalı, gelen: {raw!r}") from None
+    if not 0 <= value <= 1:
+        raise ConfigError(f"{name} 0 ile 1 arasında olmalı, gelen: {raw!r}")
+    return value
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = _env(name).lower()
     if not raw:
@@ -103,6 +116,11 @@ class Settings:
     pushover_user_key: str = field(default="", repr=False)
     error_spike_per_hour: int = 5
     llm_alerts_per_day: int = 3
+    typesafe_api_key: str = field(default="", repr=False)
+    jev_model: str = "jev-latest"
+    jev_push_high: float = 0.8     # bu olasılık ve üstü: JEV uyarıyı kendisi gönderir
+    jev_push_low: float = 0.3      # bu olasılık ve altı: uyarı yok; arası kararsız → Grok
+    jev_explain_min: float = 0.6   # bu olasılık ve üstü: Grok kısa açıklama yazar
 
     @property
     def pushover_enabled(self) -> bool:
@@ -219,4 +237,9 @@ def load_settings() -> Settings:
         pushover_user_key=_env("PUSHOVER_USER_KEY"),
         error_spike_per_hour=max(1, _int("ERROR_SPIKE_PER_HOUR", 5)),
         llm_alerts_per_day=max(0, _int("LLM_ALERTS_PER_DAY", 3)),
+        typesafe_api_key=_env("TYPESAFE_API_KEY"),
+        jev_model=_env("JEV_MODEL", "jev-latest"),
+        jev_push_high=_float("JEV_PUSH_HIGH", 0.8),
+        jev_push_low=_float("JEV_PUSH_LOW", 0.3),
+        jev_explain_min=_float("JEV_EXPLAIN_MIN", 0.6),
     )
