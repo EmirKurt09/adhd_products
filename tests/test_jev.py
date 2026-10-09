@@ -169,7 +169,8 @@ def titled(title, uid, **kw) -> Event:
 
 
 def make_router(settings, jev, assistant=None):
-    engine = Engine(replace(settings, llm_alerts_per_day=5), Store(":memory:"))
+    keyed = replace(settings, llm_alerts_per_day=5, llm_api_key="test", typesafe_api_key="test")
+    engine = Engine(keyed, Store(":memory:"))
     return engine, FindingRouter(engine.s, engine, assistant, jev)
 
 
@@ -238,3 +239,60 @@ def test_explanation_renders_after_notification(settings):
     message = M.render_event("explain", {"kind": "assignment", "title": "Lab", "course": "Ağlar", "text": "Adım <1>"},
                              settings.tz, NOW)
     assert message.text == "<b>Kısaca:</b> Lab\n<i>Ağlar</i>\nAdım &lt;1&gt;" and message.silent
+
+
+# ── /ayarlar: hangi katman çalışır ────────────────────────────────────────────
+
+MIXED = {"Acil": all_probs(push_now=0.92), "Belirsiz": all_probs(push_now=0.55, needs_explanation=0.9),
+         "Sıradan": all_probs(push_now=0.05)}
+
+
+def mixed():
+    return [titled("Acil", "1"), titled("Belirsiz", "2"), titled("Sıradan", "3")]
+
+
+def alerts(engine) -> list[str]:
+    return [p["text"] for t, p in outbox(engine) if t == "alert"]
+
+
+def test_jev_off_sends_everything_to_llm(settings):
+    jev, assistant = FakeJev(MIXED), FakeAssistant()
+    engine, router = make_router(settings, jev, assistant)
+    PR.toggle(engine.store, "jev")
+    asyncio.run(router.route(mixed()))
+    assert jev.states == [] and assistant.triaged == [(["Acil", "Belirsiz", "Sıradan"], None)]
+
+
+def test_llm_off_uncertain_findings_become_alerts(settings):
+    assistant = FakeAssistant()
+    engine, router = make_router(settings, FakeJev(MIXED), assistant)
+    PR.toggle(engine.store, "llm")
+    asyncio.run(router.route(mixed()))
+    sent = alerts(engine)
+    assert len(sent) == 2 and "Acil" in sent[0] and "Belirsiz" in sent[1]  # kaçmasın diye kararsız da gider
+    assert assistant.triaged == [] and assistant.explained == []
+    logged = [engine.store.llm_log_at(i)["actions"] for i in range(3)]
+    assert ["kararsız, LLM kapalı → uyarı gönderildi", "açıklama atlandı (LLM kapalı)"] in logged
+
+
+def test_without_llm_key_router_still_works(settings):
+    engine, router = make_router(settings, FakeJev(MIXED), None)
+    asyncio.run(router.route(mixed()))
+    assert len(alerts(engine)) == 2
+
+
+def test_jev_error_with_llm_off_sends_nothing(settings):
+    engine, router = make_router(settings, FakeJev({}, fail={"Acil"}), FakeAssistant())
+    PR.toggle(engine.store, "llm")
+    asyncio.run(router.route([titled("Acil", "1")]))
+    assert alerts(engine) == []
+    assert engine.store.llm_log_at(0)["actions"] == ["JEV hatası, LLM kapalı → sadece normal bildirim"]
+
+
+def test_both_off_does_nothing(settings):
+    jev, assistant = FakeJev(MIXED), FakeAssistant()
+    engine, router = make_router(settings, jev, assistant)
+    PR.toggle(engine.store, "jev")
+    PR.toggle(engine.store, "llm")
+    asyncio.run(router.route(mixed()))
+    assert jev.states == [] and assistant.triaged == [] and outbox(engine) == []

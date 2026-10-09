@@ -6,6 +6,11 @@
     needs_explanation ≥ JEV_EXPLAIN_MIN → Grok kısa açıklama yazar, asıl bildirimden sonra Telegram'a gider
 
 JEV hata verirse o bulgu Grok'a düşer; hiçbir bulgu karar verilmeden kalmaz.
+
+Hangi katmanın çalışacağı her çağrıda /ayarlar'a ve anahtarlara bakılarak seçilir:
+    JEV kapalı, LLM açık   → bütün bulgular Grok'a (JEV öncesi davranış)
+    JEV açık, LLM kapalı   → kararsız bulgular kaçmasın diye uyarı olarak gider, açıklama yazılmaz
+    ikisi de kapalı        → sadece normal Telegram bildirimi
 """
 
 from __future__ import annotations
@@ -62,8 +67,19 @@ class FindingRouter:
         self.assistant = assistant
         self.jev = jev
 
+    def _llm_on(self) -> bool:
+        return self.assistant is not None and self.engine.feature_on("llm")
+
     async def route(self, findings: list[Event]) -> None:
+        jev_on = self.jev is not None and self.engine.feature_on("jev")
+        if not jev_on:
+            if self._llm_on():
+                await self.assistant.triage(findings)
+            else:
+                log.info("Bulgu değerlendirmesi yok: JEV ve LLM kapalı (%d bulgu)", len(findings))
+            return
         now = datetime.now(timezone.utc)
+        llm_on = self._llm_on()
         uncertain: list[Event] = []
         notes: list[str] = []
         for event in [e for e in findings if e.type in ROUTED_TYPES][:MAX_PER_SCAN]:
@@ -76,17 +92,23 @@ class FindingRouter:
             except Exception as e:  # noqa: BLE001 - JEV yoksa karar Grok'a kalır
                 log.warning("JEV kararı alınamadı (%s): %s", data.get("title"), e)
                 self.engine.record_error("jev", f"{type(e).__name__}: {e}")
-                uncertain.append(event)
-                notes.append(f"{data.get('title')}: hızlı karar alınamadı")
-                self._log(event, state, None, ["JEV hatası → Grok karar verecek"], started, error=str(e))
+                if llm_on:
+                    uncertain.append(event)
+                    notes.append(f"{data.get('title')}: hızlı karar alınamadı")
+                    action = "JEV hatası → Grok karar verecek"
+                else:
+                    action = "JEV hatası, LLM kapalı → sadece normal bildirim"
+                self._log(event, state, None, [action], started, error=str(e))
                 continue
 
             route = decide(decision, self.s)
             actions = []
-            if route.push == "send":
+            if route.push == "send" or (route.push == "ask_llm" and not llm_on):
                 title, message = push_text(event, decision, item, self.s, now)
                 result = self.engine.notify_owner(title, message, reason=f"JEV push_now={decision.p('push_now'):.2f}")
-                actions.append("uyarı gönderildi" if result["durum"] == "gönderildi" else f"uyarı yok ({result['neden']})")
+                prefix = "kararsız, LLM kapalı → " if route.push == "ask_llm" else ""
+                actions.append(prefix + ("uyarı gönderildi" if result["durum"] == "gönderildi"
+                                         else f"uyarı yok ({result['neden']})"))
             elif route.push == "ask_llm":
                 uncertain.append(event)
                 labels = ", ".join(decision.labels) or "etiket yok"
@@ -96,15 +118,13 @@ class FindingRouter:
                 actions.append("uyarı gerekmiyor")
 
             if route.explain:
-                actions.append(await self._explain(event, decision))
+                actions.append(await self._explain(event, decision) if llm_on else "açıklama atlandı (LLM kapalı)")
             self._log(event, state, decision, actions, started)
 
-        if uncertain and self.assistant is not None:
+        if uncertain and llm_on:
             await self.assistant.triage(uncertain, notes=notes)
 
     async def _explain(self, event: Event, decision: JevDecision) -> str:
-        if self.assistant is None:
-            return "açıklama atlandı (LLM yok)"
         try:
             text = await self.assistant.explain(event, decision.labels)
         except Exception as e:  # noqa: BLE001 - açıklama "en iyi çaba"dır

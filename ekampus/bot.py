@@ -74,14 +74,16 @@ MAX_TEXT = 4000
 class Ctx:
     """bot_data içinde taşınan bağımlılıklar."""
 
-    def __init__(self, settings: Settings, store: Store, engine: Engine, assistant: Assistant | None,
-                 jev_active: bool = False):
+    def __init__(self, settings: Settings, store: Store, engine: Engine, assistant: Assistant | None):
         self.s = settings
         self.store = store
         self.engine = engine
         self.assistant = assistant
-        self.jev_active = jev_active  # JEV öncüyse açıklamaları o tetikler; ayrı ödev özeti gönderilmez
         self.last_refresh: datetime | None = None
+
+    def llm_on(self) -> bool:
+        """LLM anahtarı var ve /ayarlar'dan kapatılmamış (her kullanımda yeniden bakılır)."""
+        return self.assistant is not None and self.engine.feature_on("llm")
 
 
 def deps(context: ContextTypes.DEFAULT_TYPE) -> Ctx:
@@ -410,7 +412,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if text in BUTTON_ROUTES:
         await BUTTON_ROUTES[text](update, context)
         return
-    if c.assistant is None:
+    if not c.llm_on():
         low = text.casefold()
         for words, handler in KEYWORD_ROUTES:
             if any(w in low for w in words):
@@ -623,7 +625,9 @@ async def flush_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async def deliver(message: M.Message, ctx: dict) -> None:
         sent = await send(context.bot, c.s.telegram_owner_chat_id, message)
-        if c.assistant and not c.jev_active and ctx.get("type") == "new" and ctx.get("kind") == "assignment":
+        # JEV açıkken açıklamaları o tetikler; ayrı ödev özeti gönderilmez
+        if (c.llm_on() and not c.engine.feature_on("jev") and ctx.get("type") == "new"
+                and ctx.get("kind") == "assignment"):
             context.application.create_task(_tldr(context, c, ctx, sent.message_id))
 
     await c.engine.flush(deliver)
@@ -657,7 +661,7 @@ async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     fresh = {k: [r for r in c.store.items((k,), limit=50) if M.parse_dt(r["first_seen"]) >= since]
              for k in ("announcement", "file", "grade")}
     message = M.digest_view(rows, fresh, c.s.tz, now, last_ok=M.parse_dt(c.store.get("last_ok_at")))
-    if c.assistant:
+    if c.llm_on():
         try:
             agenda = json.dumps(c.assistant.run_tool("agenda", {"days": 7}), ensure_ascii=False)
             plan = await asyncio.wait_for(c.assistant.plan_day(agenda), timeout=60)
@@ -761,12 +765,11 @@ def build_app(settings: Settings) -> Application:
     engine = Engine(settings, store, alert_channel=pushover.send if pushover else None)
     assistant = make_assistant(settings, store, notifier=engine)  # LLM uyarıyı soyut arayüzle ister
     jev = make_jev(settings)
-    if jev is not None:
-        # Öncü JEV: her bulguda hızlı karar; kararsızsa ya da açıklama gerekiyorsa Grok devreye girer
+    if jev is not None or assistant is not None:
+        # Her bulguda: JEV açıksa öncü hızlı karar, kararsızsa Grok; JEV kapalıysa doğrudan Grok.
+        # Hangisinin çalışacağına yönlendirici her seferinde /ayarlar'a bakarak karar verir.
         engine.on_findings = FindingRouter(settings, engine, assistant, jev).route
-    elif assistant is not None:
-        engine.on_findings = assistant.triage  # JEV yoksa: her yeni bulguda Grok karar verir
-    app.bot_data["ctx"] = Ctx(settings, store, engine, assistant, jev_active=jev is not None)
+    app.bot_data["ctx"] = Ctx(settings, store, engine, assistant)
     owner = owner_filter(settings.telegram_owner_chat_id)
 
     for names, handler in [
