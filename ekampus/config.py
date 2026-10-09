@@ -102,6 +102,7 @@ class Settings:
     pushover_app_token: str = field(default="", repr=False)
     pushover_user_key: str = field(default="", repr=False)
     error_spike_per_hour: int = 5
+    llm_alerts_per_day: int = 3
 
     @property
     def pushover_enabled(self) -> bool:
@@ -217,4 +218,5 @@ def load_settings() -> Settings:
         pushover_app_token=_env("PUSHOVER_APP_TOKEN"),
         pushover_user_key=_env("PUSHOVER_USER_KEY"),
         error_spike_per_hour=max(1, _int("ERROR_SPIKE_PER_HOUR", 5)),
+        llm_alerts_per_day=max(0, _int("LLM_ALERTS_PER_DAY", 3)),
     )

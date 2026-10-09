@@ -15,6 +15,7 @@ CATEGORIES: list[tuple[str, str]] = [
     ("files", "Materyaller"),
     ("calendar", "Canlı ders / etkinlik"),
     ("digest", "Sabah özeti"),
+    ("assistant", "Asistan uyarıları"),
     ("system", "Sistem uyarıları"),
 ]
 FAIL_AFTER_CHOICES = (1, 2, 3, 5)
@@ -55,7 +56,7 @@ def category_of(event_type: str, payload: dict) -> str | None:
     if event_type in ("baseline", "scope_added"):
         return None
     if event_type == "alert":
-        return None if payload.get("critical") else "system"
+        return None if payload.get("critical") else payload.get("category", "system")
     if event_type == "reminder":
         return "reminders"
     if event_type == "live_soon":
