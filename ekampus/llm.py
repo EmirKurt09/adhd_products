@@ -88,10 +88,19 @@ FINDING_LABEL = {"new": "yeni", "due_changed": "tarih değişti", "changed": "g�
 @dataclass
 class AgentReply:
     text: str
-    actions: list[str] = field(default_factory=list)
-    files: list[str] = field(default_factory=list)  # cevaptan sonra gönderilecek materyaller
-    flush: bool = False
-    attachments: list[tuple[str, int]] = field(default_factory=list)  # gönderilecek ödev ekleri
+    turn: Turn = field(default_factory=Turn)  # yan etkiler: gönderilecek dosyalar, özet, bekleyenler...
+
+    @property
+    def actions(self) -> list[str]:
+        return self.turn.actions
+
+    @property
+    def files(self) -> list[str]:
+        return self.turn.files
+
+    @property
+    def flush(self) -> bool:
+        return self.turn.flush
 
 
 class Assistant:
@@ -219,7 +228,7 @@ class Assistant:
             reply = (reply or "Tamam.") + "\n\nYapılanlar:\n" + "\n".join(f"• {a}" for a in turn.actions)
         self.store.chat_add("user", text, now, keep=keep)
         self.store.chat_add("assistant", reply, now, keep=keep)  # model sonraki soruda ne yaptığını hatırlar
-        return AgentReply(reply, turn.actions, turn.files, turn.flush, turn.attachments)
+        return AgentReply(reply, turn)
 
     async def answer(self, text: str) -> str:
         return (await self.chat(text)).text

@@ -78,8 +78,20 @@ class Engine:
         self.flush_lock = asyncio.Lock()  # iki gönderici aynı bekleyen olayı iki kez yollamasın
 
     # ── Zamanlama yardımcıları ────────────────────────────────────────────
+    def night_window(self) -> tuple[time, time]:
+        """Gece saatleri: bot içinden değiştirildiyse o, değilse .env'deki NIGHT_HOURS."""
+        raw = self.store.get("night_hours")
+        if raw:
+            start, end = raw.split("-")
+            return time.fromisoformat(start), time.fromisoformat(end)
+        return self.s.night_start, self.s.night_end
+
+    def digest_time(self) -> time:
+        raw = self.store.get("digest_time")
+        return time.fromisoformat(raw) if raw else self.s.daily_digest_time
+
     def is_night(self, now: datetime) -> bool:
-        return in_window(now.astimezone(self.s.tz).time(), self.s.night_start, self.s.night_end)
+        return in_window(now.astimezone(self.s.tz).time(), *self.night_window())
 
     def next_scan_delay(self, now: datetime) -> float:
         minutes = self.s.night_poll_interval_min if self.is_night(now) else self.s.poll_interval_min
@@ -357,11 +369,12 @@ class Engine:
             return json.loads(row["payload"]).get("hours", 99) <= 3
         return False
 
-    async def flush(self, send: Sender, now: datetime | None = None) -> int:
+    async def flush(self, send: Sender, now: datetime | None = None, ignore_hold: bool = False) -> int:
+        """ignore_hold: öğrenci "bekleyenleri şimdi gönder" dediyse sessiz/gece beklemesi uygulanmaz."""
         async with self.flush_lock:
-            return await self._flush(send, now or utcnow())
+            return await self._flush(send, now or utcnow(), ignore_hold)
 
-    async def _flush(self, send: Sender, now: datetime) -> int:
+    async def _flush(self, send: Sender, now: datetime, ignore_hold: bool = False) -> int:
         rows = self.store.pending(now)
         if not rows:
             return 0
@@ -375,7 +388,7 @@ class Engine:
                 self.store.mark_status(row["id"], "muted")
             else:
                 enabled.append(row)
-        held = self.hold_reason(now)
+        held = None if ignore_hold else self.hold_reason(now)
         if held == "tam sessiz":  # "hiç rahatsız etme": sadece kapatılamayan kritik uyarılar (giriş sorunları)
             rows = [r for r in enabled if r["type"] == "alert" and json.loads(r["payload"]).get("critical")]
         else:

@@ -85,6 +85,14 @@ def set_assignment_reminders_muted(store: Store, uid: str, muted: bool) -> None:
     store.set("muted_reminders", json.dumps(sorted(uids)))
 
 
+def set_fail_after(store: Store, failures: int) -> dict:
+    """Siteye üst üste kaç kez erişilemeyince uyarı gelsin (1-10)."""
+    prefs = load(store)
+    prefs["fail_after"] = max(1, min(10, int(failures)))
+    save(store, prefs)
+    return prefs
+
+
 def set_value(store: Store, key: str, value: bool) -> dict:
     """Aç/kapa ayarını doğrudan belirler (ajan "duyuruları kapat" dediğinde)."""
     prefs = load(store)

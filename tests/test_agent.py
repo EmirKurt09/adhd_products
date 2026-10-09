@@ -376,3 +376,57 @@ def test_snooze_last_and_scheduled(box):
     assert result["metin"].startswith("Teslim: Lab Raporu (Ağlar)") and turn.actions[0].startswith("Ertelendi:")
     assert len(box.store.notes_pending()) == 1
     assert "hata" in call(box, "snooze", {"minutes": 1})[0]
+
+
+# ── Bekleyenler, özet, zamanlama, tekrar gönderme ─────────────────────────────
+
+def test_pending_notifications_and_send_now(box):
+    now = datetime.now(timezone.utc)
+    flush_texts(box.engine)  # kurulum özeti gitsin
+    box.engine.set_mute(now + timedelta(hours=3))
+    box.store.enqueue(Event("new", "new:announcement:z", {"kind": "announcement", "uid": "z", "title": "Vize yeri",
+                                                          "course": "Ağlar"}), now)
+    pending = box.run_read("pending_notifications", {})
+    assert pending["bekletme"] == "sessiz"
+    assert pending["bekleyen"] == [{"id": pending["bekleyen"][0]["id"], "tür": "Yeni duyuru", "başlık": "Vize yeri",
+                                    "neden": "sessiz nedeniyle bekliyor"}]
+    assert flush_texts(box.engine) == []
+    result, turn = call(box, "send_pending_now", {})
+    assert turn.force_flush and turn.actions == ["Bekleyen 1 bildirim şimdi gönderiliyor"]
+    sent = []
+
+    async def send(message, ctx):
+        sent.append(message.text)
+
+    asyncio.run(box.engine.flush(send, ignore_hold=True))
+    assert len(sent) == 1 and "Vize yeri" in sent[0] and box.engine.muted_until() is not None  # sessiz mod sürer
+    assert call(box, "send_pending_now", {})[0] == {"durum": "bekleyen bildirim yok"}
+
+
+def test_set_schedule_changes_night_and_digest(box, settings):
+    _, turn = call(box, "set_schedule", {"digest_time": "9:30", "night_hours": "00:00-08:00"})
+    assert box.engine.digest_time().strftime("%H:%M") == "09:30" and turn.reschedule
+    assert turn.actions == ["Sabah özeti saati: 09:30", "Gece saatleri: 00:00-08:00"]
+    seven_am = datetime(2026, 10, 9, 7, 30, tzinfo=settings.tz)  # .env'de 01-07 olsa gece sayılmazdı
+    assert box.engine.is_night(seven_am)
+    assert "hata" in call(box, "set_schedule", {"night_hours": "25:00-08:00"})[0]
+    assert "hata" in call(box, "set_schedule", {})[0]
+    assert box.run_read("bot_state", {})["sabah_özeti"] == "açık, saat 09:30"
+
+
+def test_alert_threshold_and_digest_now(box):
+    _, turn = call(box, "set_alert_threshold", {"failures": 4})
+    assert PR.load(box.store)["fail_after"] == 4 and turn.actions == ["Erişim uyarısı: 4 başarısız kontrolden sonra"]
+    _, turn = call(box, "send_digest_now", {})
+    assert turn.digest
+
+
+def test_resend_notification(box):
+    now = datetime.now(timezone.utc)
+    box.store.enqueue(Event("new", "new:grade:g", {"kind": "grade", "uid": "g", "title": "Vize", "course": "Ağlar",
+                                                   "extra": {"value": "85"}}), now)
+    outbox_id = box.store.outbox_by_key("new:grade:g")["id"]
+    assert "hata" in call(box, "resend_notification", {"id": outbox_id})[0]  # henüz gönderilmedi
+    box.store.mark_sent(outbox_id, now)
+    _, turn = call(box, "resend_notification", {"id": outbox_id})
+    assert turn.resend == [outbox_id] and turn.actions == ["Tekrar gönderiliyor: Yeni not · Vize"]

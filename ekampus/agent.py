@@ -18,6 +18,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from typing import Any, Callable, Protocol
 
 from . import documents, features
@@ -75,7 +76,11 @@ class Turn:
     actions: list[str] = field(default_factory=list)  # kullanıcıya gösterilecek "Yapılanlar"
     files: list[str] = field(default_factory=list)    # cevaptan sonra gönderilecek materyallerin uid'leri
     attachments: list[tuple[str, int]] = field(default_factory=list)  # gönderilecek ödev ekleri (ödev uid, ek no)
+    resend: list[int] = field(default_factory=list)   # tekrar gönderilecek bildirimlerin outbox id'leri
     flush: bool = False                               # bekleyen bildirimler hemen gönderilsin mi
+    force_flush: bool = False                         # sessiz/gece beklemesine rağmen hemen gönderilsin
+    digest: bool = False                              # sabah özeti şimdi gönderilsin
+    reschedule: bool = False                          # sabah özetinin saati değişti, iş yeniden kurulsun
 
 
 @dataclass(frozen=True)
@@ -191,6 +196,8 @@ class Toolbox:
                  params({"limit": {"type": "integer", "maximum": 30}}), self._recent_notifications),
             Tool("list_reminders", "Öğrencinin kurduğu, zamanı henüz gelmemiş kişisel hatırlatmalar.", params(),
                  self._list_reminders),
+            Tool("pending_notifications", "Henüz gönderilmemiş, bekleyen bildirimler ve neden beklediği (sessiz mod, "
+                                          "gece modu, gönderim hatası).", params(), self._pending_notifications),
             Tool("upcoming_reminders", "Önümüzdeki N gün içinde gelecek BÜTÜN hatırlatmalar, zaman sırasıyla: otomatik "
                                        "teslim hatırlatmaları (24 ve 3 saat kala), canlı ders uyarıları ve öğrencinin "
                                        "kurduğu hatırlatmalar. \"Aktif hatırlatmalarım ne?\" sorusu için.",
@@ -266,8 +273,8 @@ class Toolbox:
         state: dict = {
             "özellikler": {st.label: st.describe() for st in features.states(self.s, self.store)},
             "bildirim_türleri": {label: M.on_off(prefs.get(key)) for key, label in PR.CATEGORIES},
-            "gece_modu": f"{M.on_off(prefs.get('night'))} ({self.s.night_start:%H:%M}-{self.s.night_end:%H:%M}, "
-                         "acil olmayanlar sabaha kalır)",
+            "gece_modu": f"{M.on_off(prefs.get('night'))} ({self._night_text()}, acil olmayanlar sabaha kalır)",
+            "sabah_özeti": f"{M.on_off(prefs.get('digest'))}, saat {self._digest_time():%H:%M}",
             "erişim_uyarısı": f"{prefs.get('fail_after')} başarısız kontrolden sonra",
             "bekleyen_bildirim": self.store.outbox_stats()["pending"],
             "kişisel_hatırlatma_sayısı": len(self.store.notes_pending()),
@@ -479,6 +486,21 @@ class Toolbox:
             Tool("retry_login", "e-Kampüs girişi reddedildiği için kilitlendiyse kilidi kaldırıp bir kez daha dener. "
                                 "Sadece bot_state ya da status girişin kilitli olduğunu söylüyorsa kullan.",
                  params(), self._retry_login, writes=True),
+            Tool("send_pending_now", "Sessiz mod ya da gece modu yüzünden bekleyen bildirimleri hemen gönderir "
+                                     "(sessiz mod açık kalır). Önce pending_notifications ile neler biriktiğine bak.",
+                 params(), self._send_pending_now, writes=True),
+            Tool("send_digest_now", "Sabah özetini (bugün, bu hafta, açık ödevler, son 24 saat ve plan) hemen gönderir.",
+                 params(), self._send_digest_now, writes=True),
+            Tool("set_schedule", "Sabah özetinin saatini ve/veya gece saatlerini değiştirir. digest_time 'SS:DD', "
+                                 "night_hours 'SS:DD-SS:DD' (ör. 00:00-08:00).",
+                 params({"digest_time": {"type": "string"}, "night_hours": {"type": "string"}}),
+                 self._set_schedule, writes=True),
+            Tool("set_alert_threshold", "Siteye üst üste kaç kez erişilemeyince uyarı gelsin (1-10).",
+                 params({"failures": {"type": "integer", "minimum": 1, "maximum": 10}}, ["failures"]),
+                 self._set_alert_threshold, writes=True),
+            Tool("resend_notification", "Daha önce gönderilmiş bir bildirimi aynı haliyle tekrar gönderir; id "
+                                        "recent_notifications'tan.",
+                 params({"id": {"type": "integer"}}, ["id"]), self._resend_notification, writes=True),
         ]
 
     def _need_engine(self):
@@ -726,3 +748,89 @@ class Toolbox:
         turn.actions.append("Giriş kilidi kaldırıldı, tekrar denendi" if was_blocked else "Giriş tekrar denendi")
         result = await self._refresh_now(args, turn)
         return {"kilit_vardı": was_blocked, **result}
+
+    # ── Bekleyenler, özet, zamanlama ──────────────────────────────────────
+    def _night_text(self) -> str:
+        start, end = self.engine.night_window() if self.engine else (self.s.night_start, self.s.night_end)
+        return f"{start:%H:%M}-{end:%H:%M}"
+
+    def _digest_time(self):
+        return self.engine.digest_time() if self.engine else self.s.daily_digest_time
+
+    def _pending_notifications(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        held = self.engine.hold_reason(now) if self.engine else None
+        out = []
+        for row in self.store.pending(now, limit=50):
+            if row["type"] == "note":
+                continue
+            label, title = M.history_entry(row)
+            if row["attempts"]:
+                reason = "gönderilemedi, tekrar denenecek"
+            elif held and not (self.engine and self.engine.is_urgent(row)):
+                reason = f"{held} nedeniyle bekliyor"
+            else:
+                reason = "birazdan gidecek"
+            out.append({"id": row["id"], "tür": label, "başlık": title, "neden": reason})
+        return {"bekleyen": out, "bekletme": held or "yok"}
+
+    def _send_pending_now(self, args: dict, turn: Turn) -> dict:
+        count = len(self._pending_notifications(args, turn)["bekleyen"])
+        if not count:
+            return {"durum": "bekleyen bildirim yok"}
+        turn.force_flush = True
+        turn.actions.append(f"Bekleyen {count} bildirim şimdi gönderiliyor")
+        return {"durum": "cevaptan hemen sonra gönderilecek", "sayı": count}
+
+    def _send_digest_now(self, args: dict, turn: Turn) -> dict:
+        turn.digest = True
+        turn.actions.append("Günün özeti gönderiliyor")
+        return {"durum": "cevaptan hemen sonra gönderilecek"}
+
+    def _set_schedule(self, args: dict, turn: Turn) -> dict:
+        self._need_engine()
+        changed = {}
+        if args.get("digest_time"):
+            clock = _clock(args["digest_time"])
+            if clock is None:
+                return {"hata": "digest_time SS:DD biçiminde olmalı, ör. 09:00"}
+            self.store.set("digest_time", f"{clock:%H:%M}")
+            turn.reschedule = True
+            changed["sabah_özeti"] = f"{clock:%H:%M}"
+            turn.actions.append(f"Sabah özeti saati: {clock:%H:%M}")
+        if args.get("night_hours"):
+            parts = str(args["night_hours"]).replace("–", "-").split("-")
+            clocks = [_clock(p) for p in parts] if len(parts) == 2 else [None]
+            if None in clocks or clocks[0] == clocks[1]:
+                return {"hata": "night_hours SS:DD-SS:DD biçiminde olmalı, ör. 00:00-08:00", **changed}
+            text = f"{clocks[0]:%H:%M}-{clocks[1]:%H:%M}"
+            self.store.set("night_hours", text)
+            changed["gece_saatleri"] = text
+            turn.actions.append(f"Gece saatleri: {text}")
+        if not changed:
+            return {"hata": "digest_time ya da night_hours ver"}
+        return {"durum": "tamam", **changed}
+
+    def _set_alert_threshold(self, args: dict, turn: Turn) -> dict:
+        prefs = PR.set_fail_after(self.store, int(args["failures"]))
+        turn.actions.append(f"Erişim uyarısı: {prefs['fail_after']} başarısız kontrolden sonra")
+        return {"durum": "tamam", "eşik": prefs["fail_after"]}
+
+    def _resend_notification(self, args: dict, turn: Turn) -> dict:
+        row = self.store.outbox_row(int(args["id"]))
+        if row is None or row["status"] != "sent":
+            return {"hata": "bu numarada gönderilmiş bildirim yok"}
+        if row["id"] in turn.resend:
+            return {"durum": "zaten gönderilecek"}
+        turn.resend.append(row["id"])
+        label, title = M.history_entry({**row, "payload": json.dumps(row["payload"], ensure_ascii=False)})
+        turn.actions.append(f"Tekrar gönderiliyor: {label}" + (f" · {title}" if title else ""))
+        return {"durum": "cevaptan hemen sonra gönderilecek"}
+
+
+def _clock(text) -> dtime | None:
+    try:
+        hour, minute = str(text).strip().split(":")
+        return dtime(int(hour), int(minute))
+    except ValueError:
+        return None

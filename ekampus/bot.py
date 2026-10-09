@@ -404,7 +404,8 @@ def manager_message(c: Ctx) -> M.Message:
         "muted_courses": PR.muted_courses(c.store),
         "alert_channel": "Pushover" if c.s.pushover_enabled else "Telegram (Pushover ayarlı değil)",
     }
-    night = f"{c.s.night_start:%H:%M}–{c.s.night_end:%H:%M}"
+    start, end = c.engine.night_window()
+    night = f"{start:%H:%M}–{end:%H:%M}"
     return M.alert_manager_view(status, PR.load(c.store), PR.CATEGORIES, c.s.tz, now, night)
 
 
@@ -414,7 +415,8 @@ async def cmd_manager(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 def _next_morning(c: Ctx, now: datetime) -> datetime:
     local = now.astimezone(c.s.tz)
-    target = local.replace(hour=c.s.daily_digest_time.hour, minute=c.s.daily_digest_time.minute, second=0, microsecond=0)
+    digest = c.engine.digest_time()
+    target = local.replace(hour=digest.hour, minute=digest.minute, second=0, microsecond=0)
     if target <= local:
         target += timedelta(days=1)
     return target.astimezone(timezone.utc)
@@ -475,11 +477,27 @@ async def run_agent(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE)
         await send(context.bot, chat_id, M.Message("Şu an LLM'e ulaşamadım. Komutlar çalışıyor: /odevler, /bugun, /notlar"))
         return
     await send(context.bot, chat_id, M.Message(escape(result.text or "…")))
-    for uid in result.files:
+    await apply_turn(chat_id, result.turn, context)
+
+
+async def apply_turn(chat_id: int, turn, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ajanın cevaptan sonra yapılmasını istediği işler: dosyalar, tekrar gönderimler, özet, bekleyenler."""
+    c = deps(context)
+    for uid in turn.files:
         await send_material(chat_id, uid, context)
-    for uid, index in result.attachments:
+    for uid, index in turn.attachments:
         await send_attachment(chat_id, uid, index, context)
-    if result.flush:  # sessiz mod kapandı ya da site yenilendi: bekleyenler hemen gelsin
+    for outbox_id in turn.resend:
+        row = c.store.outbox_row(outbox_id)
+        if row is not None:
+            await send(context.bot, chat_id, M.render_event(row["type"], row["payload"], c.s.tz, now_utc()))
+    if turn.reschedule:
+        schedule_digest(context.application, c)
+    if turn.digest:
+        await send_digest(context)
+    if turn.force_flush:
+        await flush_job(context, force=True)
+    elif turn.flush:  # sessiz mod kapandı ya da site yenilendi: bekleyenler hemen gelsin
         await flush_job(context)
 
 
@@ -742,7 +760,8 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await flush_job(context)
 
 
-async def flush_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def flush_job(context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
+    """force: öğrenci istediği için sessiz/gece beklemesi uygulanmadan gönder."""
     c = deps(context)
 
     async def deliver(message: M.Message, ctx: dict) -> None:
@@ -752,7 +771,7 @@ async def flush_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 and ctx.get("kind") == "assignment"):
             context.application.create_task(_tldr(context, c, ctx, sent.message_id))
 
-    await c.engine.flush(deliver)
+    await c.engine.flush(deliver, ignore_hold=force)
     c.engine.touch()
 
 
@@ -774,9 +793,19 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if PR.load(deps(context).store)["digest"]:
+        await send_digest(context)
+
+
+def schedule_digest(app: Application, c: Ctx) -> None:
+    """Sabah özeti işini (yeniden) kurar; saat bot içinden değiştirilebildiği için motordan okunur."""
+    for job in app.job_queue.get_jobs_by_name("digest"):
+        job.schedule_removal()
+    app.job_queue.run_daily(digest_job, time=c.engine.digest_time().replace(tzinfo=c.s.tz), name="digest")
+
+
+async def send_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     c = deps(context)
-    if not PR.load(c.store)["digest"]:
-        return
     now = now_utc()
     rows = c.store.items(("assignment", "live", "event"), order="due_at")
     since = now - timedelta(hours=24)
@@ -914,7 +943,7 @@ def build_app(settings: Settings) -> Application:
     jq.run_once(scan_job, 5, name="scan")
     jq.run_repeating(flush_job, interval=15, first=20, name="flush")
     jq.run_repeating(reminder_job, interval=60, first=30, name="reminders")
-    jq.run_daily(digest_job, time=settings.daily_digest_time.replace(tzinfo=settings.tz), name="digest")
+    schedule_digest(app, app.bot_data["ctx"])
     return app
 
 
