@@ -73,11 +73,22 @@ CREATE TABLE IF NOT EXISTS llm_log (
     created_at TEXT NOT NULL,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 LLM_LOG_KEEP = 30
+MEMORY_MAX = 50        # kalıcı hafızadaki en fazla not (her LLM çağrısına eklendiği için sınırlı)
+MEMORY_TEXT_MAX = 300
 
 MAX_BACKOFF = timedelta(minutes=30)
+
+
+class MemoryFull(Exception):
+    pass
 
 
 def _ts(dt: datetime) -> str:
@@ -316,6 +327,40 @@ class Store:
     def chat_clear(self) -> None:
         with self.db:
             self.db.execute("DELETE FROM chat")
+
+    # ── Kalıcı hafıza (/hafiza) ───────────────────────────────────────────
+    # LLM'in öğrenci hakkında kalıcı notları: tercihler, planlar, bilgiler. Sohbet geçmişinden bağımsızdır,
+    # /unut onu silmez; her LLM çağrısında sistem talimatına eklenir.
+    def memory_add(self, text: str, now: datetime) -> tuple[int, bool]:
+        """(id, yeni mi). Aynı not zaten varsa onun id'si döner. Hafıza doluysa MemoryFull."""
+        text = " ".join(str(text or "").split())[:MEMORY_TEXT_MAX]
+        if not text:
+            raise ValueError("boş not")
+        existing = self.memory_list()
+        same = next((m for m in existing if m["text"].casefold() == text.casefold()), None)
+        if same:
+            return same["id"], False
+        if len(existing) >= MEMORY_MAX:
+            raise MemoryFull(f"hafıza dolu ({MEMORY_MAX} not); önce eski bir notu sil")
+        with self.db:
+            cur = self.db.execute("INSERT INTO memory (text, created_at) VALUES (?, ?)", (text, _ts(now)))
+        return cur.lastrowid, True
+
+    def memory_list(self) -> list[dict]:
+        return [dict(r) for r in self.db.execute("SELECT id, text, created_at FROM memory ORDER BY id")]
+
+    def memory_delete(self, memory_id: int) -> str | None:
+        """Silinen notun metni; yoksa None."""
+        row = self.db.execute("SELECT text FROM memory WHERE id = ?", (memory_id,)).fetchone()
+        if row is None:
+            return None
+        with self.db:
+            self.db.execute("DELETE FROM memory WHERE id = ?", (memory_id,))
+        return row["text"]
+
+    def memory_clear(self) -> int:
+        with self.db:
+            return self.db.execute("DELETE FROM memory").rowcount
 
     # ── LLM kayıtları (/llmlog) ───────────────────────────────────────────
     def llm_log_add(self, trace: dict, now: datetime) -> int:

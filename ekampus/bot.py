@@ -62,6 +62,7 @@ COMMANDS = [
     ("dersler", "Dersler ve ilerleme"), ("takvim", "30 günlük takvim"), ("yenile", "Siteyi şimdi kontrol et"),
     ("bildirimler", "Uyarı yöneticisi: aç/kapa, sessiz, geçmiş"),
     ("ayarlar", "Özellikler: LLM, JEV, Pushover aç/kapa"), ("hatirlatmalar", "Kurduğun hatırlatmalar"),
+    ("hafiza", "LLM'in senin hakkında hatırladıkları"),
     ("durum", "Sistem durumu"),
     ("sessiz", "Bildirimleri beklet: /sessiz 2s"), ("unut", "Sohbet geçmişini sil"),
     ("llmlog", "LLM son cevapta neye baktı: /llmlog, /llmlog 3, /llmlog liste"),
@@ -290,7 +291,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 def settings_message(c: Ctx) -> M.Message:
-    return M.settings_view(features.states(c.s, c.store), reminder_count=len(c.store.notes_pending()))
+    return M.settings_view(features.states(c.s, c.store), memory_count=len(c.store.memory_list()),
+                           reminder_count=len(c.store.notes_pending()))
+
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await reply(update, M.memory_view(deps(context).store.memory_list()))
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -434,6 +440,7 @@ KEYWORD_ROUTES = [
     (("dosya", "materyal", "pdf", "slayt"), cmd_files), (("ders",), cmd_courses),
     (("takvim", "sınav", "sinav", "vize", "final"), cmd_calendar), (("yenile", "kontrol"), cmd_refresh),
     (("durum",), cmd_status), (("bildirim", "uyarı", "uyari", "alarm"), cmd_manager), (("ayar",), cmd_settings),
+    (("hafıza", "hafiza"), cmd_memory), (("hatırlat", "hatirlat"), cmd_notes),
 ]
 
 
@@ -505,6 +512,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "set":
         await query.answer()
         await _edit(query, settings_message(c))
+    elif action == "mem":
+        sub, _, memory_id = arg.partition(":")
+        if sub == "del" and memory_id.isdigit():
+            removed = c.store.memory_delete(int(memory_id))
+            await query.answer("Sildim." if removed else "Bu not zaten yok.")
+        elif sub == "clear!":
+            count = c.store.memory_clear()
+            await query.answer(f"{count} not silindi.")
+        else:
+            await query.answer()
+        await _edit(query, M.memory_view(c.store.memory_list(), confirm_clear=sub == "clear"))
     elif action == "rem":
         sub, _, note_id = arg.partition(":")
         if sub == "del" and note_id.isdigit():
@@ -831,7 +849,7 @@ def build_app(settings: Settings) -> Application:
         (("duyurular",), cmd_announcements), (("dosyalar",), cmd_files), (("dersler",), cmd_courses),
         (("durum",), cmd_status), (("yenile",), cmd_refresh), (("sessiz",), cmd_mute),
         (("bildirimler", "uyarilar", "alarm"), cmd_manager), (("ayarlar", "ozellikler"), cmd_settings),
-        (("hatirlatmalar",), cmd_notes),
+        (("hatirlatmalar",), cmd_notes), (("hafiza",), cmd_memory),
         (("girisdene",), cmd_retry_login), (("unut",), cmd_forget), (("llmlog",), cmd_llmlog),
     ]:
         app.add_handler(CommandHandler(list(names), handler, filters=owner))

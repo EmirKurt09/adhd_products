@@ -316,6 +316,7 @@ def help_text(llm_off_reason: str | None = None) -> str:
         "/yenile — siteyi şimdi kontrol et",
         "/bildirimler — uyarı yöneticisi (aç/kapa, sessiz, geçmiş)",
         "/ayarlar — LLM, JEV ve Pushover'ı aç/kapa",
+        "/hatirlatmalar — kurduğun hatırlatmalar",
         "/durum — sistem durumu",
         "/sessiz 2s — 2 saat acil olmayanları beklet (/sessiz kapat)",
         "",
@@ -324,7 +325,8 @@ def help_text(llm_off_reason: str | None = None) -> str:
         lines.append("Bana normal cümleyle de yazabilirsin: <i>“bu hafta neye odaklanayım?”</i>, "
                      "<i>“cuma 18'e kadar rahatsız etme”</i>")
         lines.append("/llmlog — LLM son cevapta hangi veriye baktı (/llmlog liste, /llmlog 3)")
-        lines.append("/unut — LLM sohbet geçmişini sil")
+        lines.append("/hafiza — LLM'in senin hakkında hatırladıkları")
+        lines.append("/unut — LLM sohbet geçmişini sil (hafıza kalır)")
     else:
         hint = " → /ayarlar" if "ayarlardan" in llm_off_reason else ""
         lines.append(f"LLM {escape(llm_off_reason, quote=False)}{hint}. Şimdilik “ödev”, “bugün”, “not” gibi kelimeler yeter.")
@@ -456,6 +458,22 @@ def alert_manager_view(status: dict, prefs: dict, categories: list[tuple[str, st
 
 def _btn(text: str, data: str) -> Button:
     return Button(text, data=data)
+
+
+def memory_view(rows: list[dict], confirm_clear: bool = False) -> Message:
+    """LLM'in kalıcı hafızası: ne biliyor, tek tek ya da hepsini sil."""
+    lines = ["<b>Hafıza</b>", "LLM'in senin hakkında aklında tuttukları; her cevapta bunlara bakar."]
+    if not rows:
+        lines.append("\nHenüz bir şey yok. Kalıcı bir tercih söylediğinde (<i>“Ağlar'ı bıraktım”</i>) kendisi kaydeder.")
+    lines += [f"\n#{r['id']} {escape(r['text'])}" for r in rows]
+    if confirm_clear:
+        lines.append("\n<b>Hafızadaki her şey silinsin mi?</b>")
+        return Message("\n".join(lines), [[_btn("Evet, hepsini sil", "mem:clear!"), _btn("Vazgeç", "mem:list")]])
+    deletes = [_btn(f"Sil #{r['id']}", f"mem:del:{r['id']}") for r in rows]
+    buttons = [deletes[i:i + 4] for i in range(0, len(deletes), 4)]
+    bottom = [_btn("Hepsini sil", "mem:clear")] if rows else []
+    buttons.append(bottom + [_btn("Ayarlar", "set:show")])
+    return Message("\n".join(lines), buttons)
 
 
 def notes_view(notes: list[dict], tz: ZoneInfo, now: datetime) -> Message:
