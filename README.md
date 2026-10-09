@@ -2,34 +2,73 @@
 
 İstanbul Ticaret Üniversitesi e-Kampüs sistemi (Toltek TCampus) için Telegram üzerinden çalışan, ADHD dostu kişisel öğrenci asistanı.
 
-e-Kampüs yeni bir ödev, duyuru ya da not girildiğinde öğrenciye haber vermiyor; bir şeyin değişip değişmediğini anlamak için siteye sürekli girip bakmak gerekiyor. Dikkat dağınıklığı yaşayan biri için bu, teslim tarihlerinin kaçması demek. Bu proje siteyi düzenli aralıklarla kontrol ediyor ve önemli olan her şeyi Telegram'a yazıyor. Teslimlerden önce hatırlatıyor, her sabah günün özetini çıkarıyor. Normal cümleyle sorulan sorulara da sitedeki gerçek veriye dayanarak cevap veriyor.
+e-Kampüs yeni bir ödev, duyuru ya da not girildiğinde öğrenciye haber vermiyor. Bir şeyin değişip değişmediğini anlamak için siteye sürekli girip bakmak gerekiyor; dikkat dağınıklığı yaşayan biri için bu, kaçan teslim tarihleri demek.
+
+Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Telegram'a yazar. Teslimlerden önce hatırlatır, her sabah günün özetini çıkarır. Sohbete normal cümleyle yazılan her şeyi bir LLM ajanı karşılar: sitedeki gerçek veriye bakarak cevap verir, botu da yönetir. Örneğin "cuma 18'e kadar rahatsız etme", "yarın 10'da raporu hatırlat" ya da "Ağlar'ı bıraktım, aklında olsun" demek yeter.
 
 ## Özellikler
 
-- **Takip:** ödevler ve teslim durumu, notlar, duyurular, ders materyalleri, canlı dersler ve sınavlar.
-- **Bildirim:** yeni ya da değişen her şey Telegram'a anında gelir; ödev ayrıntısı ve dosyalar mesajdaki butonlarla açılır.
-- **Hatırlatma:** teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce; her sabah günün özeti.
-- **Uyarı yöneticisi:** bildirim türlerini açıp kapatma, gece ve sessiz mod; siteye erişilemediğinde açıklamalı uyarı.
-- **Karar katmanı (JEV):** Her yeni bulgu önce TypeSafe JEV'e sorulur. JEV bulgunun teslim gerektirip gerektirmediğine, sınavla ya da tarih değişikliğiyle ilgili olup olmadığına bakar; uyarı gönderilmesi ve LLM'in açıklama yazması gerekip gerekmediğine karar verir. Emin olmadığı durumları LLM'e bırakır.
-- **LLM asistanı:** Grok ya da DeepSeek ile serbest soru, bulgu açıklamaları ve günlük plan. JEV kararsız kaldığında bağlama bakıp uyarı kararını verir. `/llmlog` ile JEV'in olasılıkları ve LLM'in neye bakıp ne dediği görülebilir.
-- **Sistem izleme:** çökme, takılma, hata artışı, siteye erişilememesi ve giriş sorunları Pushover'a bildirilir; takılan bot kendini yeniden başlatır.
-- **Güvenilirlik:** hiçbir bildirim kaybolmaz ya da iki kez gelmez.
+- **Takip:** Ödevler ve teslim durumu, notlar, duyurular, ders materyalleri, canlı dersler ve sınavlar.
+- **Bildirim:** Yeni ya da değişen her şey Telegram'a anında gelir. Ödev ayrıntısı ve dosyalar mesajdaki butonlarla açılır.
+- **Hatırlatma:**
+  - Teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce.
+  - Her sabah günün özeti.
+  - Öğrencinin kendi kurduğu saatli hatırlatmalar.
+- **LLM ajanı:** Sohbete yazılan mesajı Grok ya da DeepSeek araçlarla cevaplar ve botu yönetebilir:
+  - Belirli bir saate kadar sessiz mod.
+  - Bildirim türlerini ve özellikleri açıp kapatma.
+  - Ödevi "teslim ettim" olarak işaretleme.
+  - Saatli hatırlatma kurma.
+  - Materyal gönderme ve siteyi hemen kontrol etme.
+
+  Yaptığı her değişiklik cevabın altında "Yapılanlar" olarak listelenir.
+- **Kalıcı hafıza:** Ajan, öğrencinin söylediği kalıcı tercihleri ve bilgileri (bırakılan ders, çalışma saatleri…) kendisi not eder ve sonraki her cevapta dikkate alır. Notlar `/hafiza`'dan görülür ve silinir.
+- **Karar katmanı (JEV):** Her yeni bulgu önce TypeSafe JEV'e sorulur.
+  - JEV bulgunun teslim gerektirip gerektirmediğine, sınavla ya da tarih değişikliğiyle ilgili olup olmadığına bakar.
+  - Uyarı gönderilip gönderilmeyeceğine ve LLM'in açıklama yazıp yazmayacağına karar verir.
+  - Emin olmadığı durumları LLM'e bırakır.
+- **Uyarı yöneticisi:** Bildirim türleri açılıp kapatılabilir; gece modu ve iki seviyeli sessiz mod vardır. Siteye erişilemediğinde açıklamalı uyarı gelir.
+- **Sistem izleme:** Çökme, takılma, hata artışı, siteye erişilememesi ve giriş sorunları Pushover'a bildirilir. Takılan bot kendini yeniden başlatır.
+- **İsteğe bağlı özellikler:** LLM, JEV ve Pushover anahtarı varsa çalışır ve `/ayarlar`'dan açılıp kapatılır. Anahtarı olmayan özelliği bot açılışta, `/durum`'da ve `/ayarlar`'da "çalışmıyor: .env'de X yok" diye bildirir. Bot bunların hiçbiri olmadan da takip, bildirim ve hatırlatma yapar.
+- **Güvenilirlik:** Hiçbir bildirim kaybolmaz ya da iki kez gelmez.
 
 ## Nasıl çalışır
 
 ```mermaid
 flowchart LR
-    S[e-Kampüs] -->|Playwright, salt okunur| T[Tarama]
-    T --> P[Ayrıştırma]
-    P --> D[Fark algılama]
-    D --> DB[(SQLite<br/>kayıtlar ve bildirim kuyruğu)]
-    DB --> B[Telegram botu]
-    DB --> L[LLM araçları]
-    L <--> M[Grok / DeepSeek]
-    B <--> U[Kullanıcı]
+    S[e-Kampüs] -->|Playwright, salt okunur| T[Tarama ve<br/>fark algılama]
+    T --> DB[(SQLite<br/>kayıtlar, bildirim kuyruğu,<br/>hafıza, hatırlatmalar)]
+    DB -->|bildirimler| TG[Telegram botu]
+    TG <--> U((Öğrenci))
+    T -->|yeni bulgular| J{JEV<br/>karar katmanı}
+    J -->|emin: uyarı| PO[Pushover]
+    J -->|kararsız ya da<br/>açıklama gerekli| A
+    TG -->|serbest metin| A[LLM ajanı<br/>Grok / DeepSeek]
+    A -->|cevap ve Yapılanlar| TG
+    A <-->|okuma ve eylem araçları| DB
+    DB -->|sistem uyarıları| PO
+    classDef optional stroke-dasharray: 5 5
+    class J,A,PO optional
 ```
 
-Bot belirli aralıklarla e-Kampüs'e girer ve ders sayfalarını, takvimi ve duyuruları okur. Okuduğu her şeyi bir önceki durumla karşılaştırır; yeni ya da değişen her kayıt bir bildirime dönüşür ve Telegram'a iletilene kadar kuyrukta bekler. Komutlar ve LLM aynı veritabanını kullanır.
+Kesik çerçeveli bileşenler isteğe bağlıdır. Anahtarı yoksa ya da `/ayarlar`'dan kapatılmışsa devre dışı kalırlar ve bot bunu söyler.
+
+**Tarama:** Bot belirli aralıklarla e-Kampüs'e girer; ders sayfalarını, takvimi ve duyuruları okur. Okuduğu her şeyi bir önceki durumla karşılaştırır. Yeni ya da değişen her kayıt bir bildirime dönüşür ve Telegram'a iletilene kadar kuyrukta bekler.
+
+**Yeni bulgular:** Her bulgu ayrıca karar katmanına gider.
+- JEV emin olduğunda öne çıkan uyarıyı kendisi gönderir.
+- Emin olmadığında ya da açıklama gerektiğinde kararı LLM'e bırakır.
+
+Hangi bileşenin çalışacağı her bulguda yeniden seçilir:
+- JEV kapalıysa bulgular doğrudan LLM'e gider.
+- LLM kapalıysa JEV'in kararsız kaldığı bulgular kaçmasın diye uyarı olarak gider.
+- Pushover kapalıysa uyarılar Telegram'a gelir.
+
+**Sohbet:** Sohbete yazılan mesaj JEV'e uğramadan doğrudan LLM ajanına gider. Ajan iki tür araç kullanır:
+- **Okuma araçları:** Kayıtlara, ajandaya ve botun kendi durumuna bakar.
+- **Eylem araçları:** Sessiz modu, ayarları, hatırlatmaları ve hafızayı değiştirir.
+
+Bulguları değerlendirirken eylem araçları ajana verilmez. Böylece site metnine gömülü bir talimat botun ayarlarını değiştiremez.
 
 Yanlış alarm vermemek için algılama temkinli çalışır:
 - İlk kurulumda var olan kayıtlar bildirilmez.
@@ -45,6 +84,8 @@ Yanlış alarm vermemek için algılama temkinli çalışır:
 | Bot | python-telegram-bot 22 (asyncio, JobQueue) |
 | Veri | SQLite |
 | LLM | OpenAI uyumlu API: xAI Grok, DeepSeek |
+| Karar katmanı | TypeSafe JEV |
+| Uyarılar | Pushover (httpx) |
 | Çalıştırma | Docker, Docker Compose, Windows Görev Zamanlayıcı |
 | Test | pytest |
 
@@ -53,15 +94,21 @@ Yanlış alarm vermemek için algılama temkinli çalışır:
 ```
 ekampus/
   config.py      ayarlar (ortam değişkenleri)
+  features.py    isteğe bağlı özellikler: anahtar ve aç/kapa durumu
   browser.py     Playwright oturumu ve login koruması
   scan.py        tarama turu: kaynakları okuyup kayıtları kurar
   parse.py       sayfa ayrıştırıcıları
   detect.py      önceki durumla karşılaştırma, olay üretimi
   reminders.py   teslim hatırlatma ve canlı ders kuralları
-  store.py       SQLite: kayıtlar, bildirim kuyruğu, sohbet geçmişi, LLM kayıtları
-  engine.py      tarama zamanlaması, sağlık uyarıları, bildirim gönderimi
+  store.py       SQLite: kayıtlar, bildirim kuyruğu, sohbet geçmişi, hafıza, LLM kayıtları
+  engine.py      tarama zamanlaması, sağlık uyarıları, sessiz mod, bildirim gönderimi
+  jev.py         JEV istemcisi ve bulgunun karar katmanına giden hali
+  router.py      bulgu yönlendirici: JEV, LLM ve uyarı arasında karar
+  agent.py       ajanın araç kutusu: okuma ve eylem araçları
+  llm.py         LLM asistanı: sohbet, bulgu değerlendirmesi, açıklama, sabah planı
+  pushover.py    Pushover istemcisi
+  watchdog.py    takılma bekçisi
   bot.py         Telegram komutları, butonlar, erişim kontrolü
-  llm.py         LLM asistanı ve salt okunur araçları
   messages.py    mesaj biçimleri
   prefs.py       bildirim tercihleri
   explore.py     sitenin salt okunur keşfi (geliştirme aracı)
@@ -77,8 +124,12 @@ docs/            site haritası
 - Python 3.12 ya da üstü
 - e-Kampüs (ÖBS) hesabı
 - Telegram bot token'ı (@BotFather'dan)
-- İsteğe bağlı: xAI ya da DeepSeek API anahtarı
 - Sunucuda çalıştırmak için: Docker
+
+**İsteğe bağlı (anahtarı yoksa o özellik çalışmaz, bot da bunu söyler):**
+- xAI ya da DeepSeek API anahtarı: LLM ajanı
+- TypeSafe API anahtarı: JEV
+- Pushover uygulama token'ı ve kullanıcı anahtarı: telefona uyarı
 
 ### Yerel
 
@@ -91,9 +142,15 @@ cp .env.example .env                                             # sonra doldur
 .venv/Scripts/python -m ekampus bot
 ```
 
-Telegram'a bağlamak için `TELEGRAM_OWNER_CHAT_ID`'yi boş bırakıp botu başlat ve bota `/start` yaz. Bot sana chat ID'ni söyler; onu `.env`'e yazıp botu yeniden başlat. Bot bundan sonra yalnızca bu hesapla konuşur.
+**Telegram'a bağlama:**
+1. `TELEGRAM_OWNER_CHAT_ID`'yi boş bırakıp botu başlat ve bota `/start` yaz.
+2. Bot sana chat ID'ni söyler; onu `.env`'e yazıp botu yeniden başlat.
 
-Sistem uyarılarını Pushover'a almak için pushover.net'te bir uygulama oluşturup uygulama token'ını ve kullanıcı anahtarını `.env`'e yaz; `doctor` anahtarları doğrular, `test-notify --olay pushover` deneme gönderir.
+Bot bundan sonra yalnızca bu hesapla konuşur.
+
+**Pushover:** Sistem uyarılarını Pushover'a almak için pushover.net'te bir uygulama oluştur; uygulama token'ını ve kullanıcı anahtarını `.env`'e yaz. `doctor` anahtarları doğrular, `test-notify --olay pushover` deneme gönderir.
+
+**JEV:** JEV'i denemek için `TYPESAFE_API_KEY`'i yaz. `jev-test` örnek bulgularda JEV'in olasılıklarını ve yönlendiricinin kararını gösterir; hiçbir şey göndermez.
 
 Windows'ta oturum açılınca arka planda başlaması için:
 
@@ -104,11 +161,11 @@ powershell -ExecutionPolicy Bypass -File scripts\windows-autostart.ps1     # kal
 ### Sunucu (Docker)
 
 ```bash
-DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh --env   # ilk kurulum
+DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh --env   # ilk kurulum ya da .env değişince
 DEPLOY_HOST=root@SUNUCU DEPLOY_KEY=~/.ssh/anahtar scripts/deploy.sh         # güncelleme
 ```
 
-Betik kodu sunucuya gönderip orada derler ve botu yeniden başlatır; `--env` ile yapılandırma dosyası da SSH üzerinden aktarılır. Sunucu yeniden başlarsa bot kendiliğinden kalkar.
+Betik kodu sunucuya gönderir, orada derler ve botu yeniden başlatır. `--env` ile yapılandırma dosyası da SSH üzerinden aktarılır. Sunucu yeniden başlarsa bot kendiliğinden kalkar.
 
 ### Yapılandırma
 
@@ -118,15 +175,15 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 |---|---|---|
 | `EKAMPUS_USERNAME`, `EKAMPUS_PASSWORD` | ÖBS kullanıcı adı ve şifresi | |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID` | Bot token'ı ve botun konuşacağı tek hesap | |
-| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | `xai` ya da `deepseek`, API anahtarı, model | `deepseek`, boş, otomatik |
-| `PUSHOVER_APP_TOKEN`, `PUSHOVER_USER_KEY` | Sistem uyarıları için Pushover; boşsa uyarılar Telegram'a gider | boş |
-| `ERROR_SPIKE_PER_HOUR` | Bir saatte kaç hata birikince "hata artışı" uyarısı gelir | 5 |
+| `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | `xai` ya da `deepseek`, API anahtarı, model; anahtar yoksa LLM ajanı çalışmaz | `deepseek`, boş, otomatik |
+| `TYPESAFE_API_KEY` | JEV karar katmanı; boşsa bulgulara LLM karar verir | boş |
+| `PUSHOVER_APP_TOKEN`, `PUSHOVER_USER_KEY` | Uyarılar için Pushover; boşsa uyarılar Telegram'a gider | boş |
 | `LLM_DAILY_TOKEN_BUDGET` | Günlük token sınırı | 200000 |
 | `LLM_HISTORY_MESSAGES` | Her soruda modele tekrar gönderilen son mesaj sayısı | 20 |
 | `LLM_ALERTS_PER_DAY` | Günde gönderilebilecek öne çıkan asistan uyarısı sayısı (0 = kapalı) | 3 |
-| `TYPESAFE_API_KEY` | JEV karar katmanı; boşsa kararları LLM verir | boş |
 | `JEV_PUSH_HIGH`, `JEV_PUSH_LOW` | JEV'in uyarıyı kendisi göndereceği ve kararı LLM'e bırakacağı olasılık sınırları | 0.8, 0.3 |
 | `JEV_EXPLAIN_MIN` | LLM'in açıklama yazması için gereken olasılık | 0.6 |
+| `ERROR_SPIKE_PER_HOUR` | Bir saatte kaç hata birikince "hata artışı" uyarısı gelir | 5 |
 | `POLL_INTERVAL_MIN`, `NIGHT_POLL_INTERVAL_MIN` | Gündüz ve gece kontrol aralığı (dakika) | 15, 60 |
 | `NIGHT_HOURS` | Acil olmayan bildirimlerin sabaha bekletildiği saatler | 01:00-07:00 |
 | `DAILY_DIGEST_TIME` | Sabah özetinin saati | 08:00 |
@@ -139,22 +196,40 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `/bugun`, `/hafta`, `/takvim` | Bugün ve yarın, önümüzdeki 7 gün, önümüzdeki 30 gün |
 | `/odevler` | Açık ödevler, teslim tarihine göre sıralı |
 | `/notlar`, `/duyurular`, `/dersler` | Notlar, son duyurular, dersler ve ilerleme durumu |
-| `/dosyalar [ders]` | Ders seçilir, o dersin materyalleri bölümlere göre biçimleriyle (PDF, ZIP, PowerPoint…) listelenir; dokunulan materyal dosya olarak gönderilir |
+| `/dosyalar [ders]` | Önce ders seçilir; o dersin materyalleri bölümlere göre, biçimleriyle (PDF, ZIP, PowerPoint…) listelenir. Dokunulan materyal dosya olarak gönderilir |
 | `/bildirimler` | Uyarı yöneticisi: sistem durumu, bildirim türleri, gece modu, sessiz mod, geçmiş |
+| `/ayarlar` | LLM, JEV ve Pushover'ı aç/kapa; hafıza ve hatırlatmalara geçiş |
+| `/hafiza` | LLM'in senin hakkında hatırladıkları; tek tek ya da hepsini silme |
+| `/hatirlatmalar` | Kurduğun saatli hatırlatmalar ve iptal |
 | `/sessiz 2s` | Acil olmayan bildirimleri belirli bir süre beklet (`30dk`, `1g`, `kapat`) |
-| `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş ve kuyruk durumu |
-| `/llmlog`, `/unut` | LLM'in son cevapta baktığı veriler; sohbet geçmişini silme |
+| `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş, kuyruk ve özelliklerin durumu |
+| `/llmlog`, `/unut` | LLM'in son cevapta baktığı veriler ve yaptığı eylemler; sohbet geçmişini silme (hafıza kalır) |
 | `/girisdene` | Reddedilen bir girişten sonra login kilidini kaldırıp tekrar dene |
 
-Komutların dışında bota normal cümleyle de yazılabilir. LLM bağlıysa soruyu o cevaplar; bağlı değilse "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştırır.
+**Komutların dışında bota normal cümleyle de yazılabilir:**
+- "bu hafta neye odaklanayım?"
+- "cuma 18'e kadar rahatsız etme, acil olsa bile"
+- "yarın 10'da Ağlar raporunu hatırlat"
+- "Lab Raporu 2'yi teslim ettim"
+- "duyuruları kapat"
+- "ağlar dersinin son slaytını at"
+- "Ağlar'ı bıraktım, aklında olsun"
+
+LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştırır.
 
 ## Güvenlik ve gizlilik
 
 - **Salt okunur:** Bot e-Kampüs'e hiçbir şey yazmaz; ödev teslim etmez, form göndermez.
 - **Hesap güvenliği:** Şifre reddedilirse giriş tekrar denenmez, böylece hesap kilitlenmez.
-- **Tek kullanıcı:** Bot yalnızca sahibine cevap verir; başkalarının mesajlarını yanıtsız bırakır ve sahibine bildirir.
+- **Tek kullanıcı:** Bot yalnızca sahibine cevap verir. Başkalarının mesajlarını yanıtsız bırakır ve sahibine bildirir.
 - **Gizli bilgiler:** Şifre, token ve API anahtarı sadece `.env` dosyasında durur, repoya girmez.
-- **LLM ve JEV:** İkisi de yalnızca ödev, not, duyuru ve takvim gibi ders verilerini görür; kimlik bilgilerine ve anahtarlara erişimleri yoktur. Bu veriler kullanılan LLM sağlayıcısına ve TypeSafe'e gider. Uyarı göndermesi soyut bir araçla olur: model hangi kanalın kullanıldığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
+- **LLM ve JEV:**
+  - İkisi de yalnızca ödev, not, duyuru ve takvim gibi ders verilerini görür; kimlik bilgilerine ve anahtarlara erişimleri yoktur. Bu veriler kullanılan LLM sağlayıcısına ve TypeSafe'e gider.
+  - Uyarı göndermesi soyut bir araçla olur: model kanalın nasıl çalıştığını ve anahtarları bilmez, sadece sana gönderebilir ve günlük sınırı vardır.
+- **Ajanın eylemleri:**
+  - Ajan sadece sohbette, senin mesajına cevap verirken eylem yapar; bulguları değerlendirirken eylem araçları ona hiç verilmez.
+  - Zamanlar ve sınırlar kodda doğrulanır.
+  - Her değişiklik cevabın altında listelenir ve `/llmlog`'da "[eylem]" olarak görünür.
 
 ## Geliştirme
 
@@ -163,11 +238,11 @@ Komutların dışında bota normal cümleyle de yazılabilir. LLM bağlıysa sor
 .venv/Scripts/python -m ekampus doctor              # ortam ve bağlantı kontrolü
 .venv/Scripts/python -m ekampus check --dry-run     # tek tarama, durumu değiştirmeden
 .venv/Scripts/python -m ekampus test-notify --olay odev   # örnek bildirimi botun hattından geçir
+.venv/Scripts/python -m ekampus jev-test            # örnek bulgularda JEV kararları
 ```
 
 Sitenin yapısı, kullanılan adresler ve dikkat edilmesi gereken noktalar [docs/site-map.md](docs/site-map.md) dosyasında.
 
 ## Yol haritası
 
-- LLM için uzun süreli hafıza
 - Duyuru, sanal sınıf ve sınav kayıtlarının gerçek veriyle doğrulanması
