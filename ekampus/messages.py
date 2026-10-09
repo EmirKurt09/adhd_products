@@ -489,7 +489,9 @@ def notes_view(notes: list[dict], tz: ZoneInfo, now: datetime) -> Message:
     buttons = []
     for note in notes[:20]:
         at = parse_dt(note.get("at"))
-        lines.append(f"\n#{note['id']} {fmt_dt(at, tz, now)} · {remaining(at, now)}\n{escape(clip(note.get('text', ''), 200))}")
+        channel = {"pushover": " · Pushover", "both": " · Telegram + Pushover"}.get(note.get("channel", ""), "")
+        lines.append(f"\n#{note['id']} {fmt_dt(at, tz, now)} · {remaining(at, now)}{channel}\n"
+                     f"{escape(clip(note.get('text', ''), 200))}")
         buttons.append([_btn(f"İptal #{note['id']}: {clip(note.get('text', ''), 30)}", f"rem:del:{note['id']}")])
     buttons.append([_btn("Ayarlar", "set:show")])
     return Message("\n".join(lines), buttons)

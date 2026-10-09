@@ -349,7 +349,7 @@ def test_muted_course_findings_skip_jev_and_llm(box, settings):
 
 def test_remind_before_due_and_mute_assignment_reminders(box):
     result, turn = call(box, "remind_before_due", {"uid": "7", "hours_before": 0.5})
-    assert result["durum"] == "tamam" and turn.actions[0].endswith("Lab Raporu (30 dk kala)")
+    assert result["durum"] == "tamam" and turn.actions[0].endswith("Lab Raporu (30 dk kala) · Telegram")
     note = box.store.notes_pending()[0]
     due = box.store.item("assignment", "7")["due"]
     assert M.parse_dt(note["at"]) == due - timedelta(minutes=30) and "teslimine 30 dk kaldı" in note["text"]
@@ -437,3 +437,94 @@ def test_model_action_list_without_colon_is_removed(box, settings):
     a.client, _ = scripted(_response(tool_calls=[_Call("c1", "end_quiet", {})]),
                            _response(content="Kapattım.\n\nYapılanlar\n• end_quiet çağrıldı"))
     assert asyncio.run(a.chat("sessizi kapat")).text == "Kapattım.\n\nYapılanlar:\n• Sessiz mod kapatıldı"
+
+
+# ── Hatırlatma kanalı ve uydurma eylem kontrolü ───────────────────────────────
+
+def pushover_box(settings):
+    pushed: list[tuple[str, int]] = []
+
+    async def channel(text, priority):
+        pushed.append((text, priority))
+
+    keyed = replace(settings, pushover_app_token="a", pushover_user_key="u")
+    engine = Engine(keyed, Store(":memory:"), alert_channel=channel)
+    return Toolbox(keyed, engine.store, engine=engine), pushed
+
+
+def deliver_at(box, at) -> list[str]:
+    sent: list[str] = []
+
+    async def send(message, ctx):
+        sent.append(message.text)
+
+    asyncio.run(box.engine.flush(send, at))
+    return sent
+
+
+@pytest.mark.parametrize("channel,telegram,pushover", [("pushover", 0, 1), ("both", 1, 1), ("telegram", 1, 0)])
+def test_reminder_channels(settings, channel, telegram, pushover):
+    box, pushed = pushover_box(settings)
+    result, turn = call(box, "remind_me", {"at": local(settings, timedelta(hours=1)), "text": "yemek ye",
+                                           "channel": channel})
+    assert result["kanal"] == {"pushover": "Pushover", "both": "Telegram + Pushover", "telegram": "Telegram"}[channel]
+    assert "uyarı" not in result and turn.actions[0].endswith(result["kanal"])
+    sent = deliver_at(box, datetime.now(timezone.utc) + timedelta(hours=1, minutes=1))
+    assert len(sent) == telegram and len(pushed) == pushover
+    if pushover:
+        assert pushed[0] == ("<b>Hatırlatma:</b> yemek ye", 1)
+
+
+def test_pushover_reminder_without_pushover_says_so(box, settings):
+    result, turn = call(box, "remind_me", {"at": local(settings, timedelta(hours=1)), "text": "yemek ye",
+                                           "channel": "pushover"})
+    assert result["kanal"] == "Telegram" and "Pushover çalışmıyor" in result["uyarı"]
+    assert box.store.notes_pending()[0].get("channel") is None  # Telegram'a kuruldu
+
+
+def test_pushover_failure_falls_back_to_telegram_for_reminders(settings):
+    async def broken(text, priority):
+        raise RuntimeError("pushover kapalı")
+
+    keyed = replace(settings, pushover_app_token="a", pushover_user_key="u")
+    engine = Engine(keyed, Store(":memory:"), alert_channel=broken)
+    box = Toolbox(keyed, engine.store, engine=engine)
+    call(box, "remind_me", {"at": local(settings, timedelta(hours=1)), "text": "yemek ye", "channel": "pushover"})
+    assert deliver_at(box, datetime.now(timezone.utc) + timedelta(hours=1, minutes=1)) == ["<b>Hatırlatma:</b> yemek ye"]
+
+
+def test_claimed_but_unperformed_action_is_corrected(box, settings):
+    a = agent(box, settings)
+    args = {"at": local(settings, timedelta(hours=4)), "text": "akşam ödev"}
+    a.client, sent = scripted(
+        _response(content="Akşam hatırlatmasını mesaj yoluyla da kurdum."),       # tool çağırmadan iddia
+        _response(tool_calls=[_Call("c1", "remind_me", args)]),                    # düzeltme turunda gerçekten kurar
+        _response(content="Akşam 20:00 hatırlatmasını kurdum."),
+    )
+    reply = asyncio.run(a.chat("akşam hatırlatmasını mesaj yoluyla da yap"))
+    assert "[Sistem kontrolü]" in sent[1]["messages"][-1]["content"]
+    assert len(box.store.notes_pending()) == 1 and "Yapılanlar:\n• Hatırlatma kuruldu" in reply.text
+    assert "[Sistem kontrolü]" not in a.store.chat_recent(2)[0]["content"]  # düzeltme mesajı geçmişe girmez
+
+
+def test_claim_that_survives_correction_is_flagged(box, settings):
+    a = agent(box, settings)
+    a.client, _ = scripted(_response(content="Kurdum."), _response(content="Evet, kurdum."))
+    reply = asyncio.run(a.chat("hatırlat"))
+    assert reply.text == "Evet, kurdum.\n\n(Not: Bu cevapta hiçbir işlem yapılmadı.)"
+    assert box.store.notes_pending() == []
+
+
+def test_update_reminder_changes_time_and_channel_in_place(settings):
+    box, pushed = pushover_box(settings)
+    created, _ = call(box, "remind_me", {"at": local(settings, timedelta(hours=3)), "text": "yemek",
+                                         "channel": "pushover"})
+    result, turn = call(box, "update_reminder", {"id": created["id"], "at": local(settings, timedelta(minutes=15)),
+                                                 "channel": "both"})
+    assert result["kanal"] == "Telegram + Pushover" and turn.actions[0].startswith("Hatırlatma güncellendi:")
+    notes = box.store.notes_pending()
+    assert len(notes) == 1 and notes[0]["channel"] == "both"  # ikinci hatırlatma kurulmadı
+    sent = deliver_at(box, datetime.now(timezone.utc) + timedelta(minutes=16))
+    assert len(sent) == 1 and len(pushed) == 1
+    assert "hata" in call(box, "update_reminder", {"id": created["id"], "text": "x"})[0]  # gönderildi, artık yok
+    assert box.run_read("upcoming_reminders", {}) == []

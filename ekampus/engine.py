@@ -323,13 +323,19 @@ class Engine:
                    "course": data.get("course"), "text": text[:2000]}
         return self.store.enqueue(Event("explain", f"explain:{event.key}", payload), now or utcnow())
 
-    def schedule_note(self, text: str, at: datetime, now: datetime | None = None) -> tuple[int, bool]:
+    def pushover_ready(self) -> bool:
+        return self.alert_channel is not None and self.feature_on("pushover")
+
+    def schedule_note(self, text: str, at: datetime, now: datetime | None = None,
+                      channel: str = "telegram") -> tuple[int, bool]:
         """Kişisel hatırlatma: outbox'a zamanı gelince gönderilmek üzere girer.
-        (id, yeni mi); aynı saat ve metin zaten kuruluysa onun id'si döner, ikinci kez girmez."""
+        channel: telegram | pushover | both. (id, yeni mi); aynı saat, metin ve kanal zaten kuruluysa onun id'si döner."""
         now = now or utcnow()
-        digest = hashlib.sha1(text.encode()).hexdigest()[:10]
+        digest = hashlib.sha1((text if channel == "telegram" else f"{channel}|{text}").encode()).hexdigest()[:10]
         key = f"note:{at.astimezone(timezone.utc).isoformat(timespec='minutes')}:{digest}"
         payload = {"text": text, "at": at.astimezone(timezone.utc).isoformat(), "set_at": now.isoformat()}
+        if channel != "telegram":
+            payload.update(channel=channel, priority=1)  # Pushover'da sesli gelsin
         new = self.store.enqueue(Event("note", key, payload), now, not_before=at)
         return self.store.outbox_by_key(key)["id"], new
 
@@ -415,10 +421,27 @@ class Engine:
                     sent += len(members)
         for row, payload in singles:
             message = render_event(row["type"], payload, self.s.tz, now)
-            sender = self._alert_sender(send) if row["type"] == "alert" else send
+            sender = self._sender_for(row["type"], payload, send)
             if await self._deliver(sender, message, {"type": row["type"], **payload}, [row], now):
                 sent += 1
         return sent
+
+    def _sender_for(self, event_type: str, payload: dict, telegram: Sender) -> Sender:
+        """alert ve "Pushover'dan hatırlat" denmiş kişisel hatırlatmalar Pushover'a; "both" ise ikisine."""
+        channel = payload.get("channel", "telegram") if event_type == "note" else None
+        if event_type == "alert" or channel == "pushover":
+            return self._alert_sender(telegram)
+        if channel == "both":
+            async def both(message: Message, context: dict) -> None:
+                await telegram(message, context)
+                if self.pushover_ready():  # Telegram'a zaten gitti; Pushover hatası tekrar Telegram'a düşmez
+                    try:
+                        await self.alert_channel(message.text, int(context.get("priority", 0)))
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Hatırlatma Pushover'a gönderilemedi: %s", e)
+                        self.record_error("pushover", f"{type(e).__name__}: {e}")
+            return both
+        return telegram
 
     def _alert_sender(self, telegram: Sender) -> Sender:
         """Sistem uyarısı: önce Pushover (ayarlardan kapalı değilse); gönderilemezse kaybolmasın diye Telegram'a düş."""

@@ -25,6 +25,13 @@ log = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
 ACTIONS_BLOCK = re.compile(r"(?:^|\n)[ \t]*Yapılanlar[ \t]*:?[ \t]*(?=\n|$)")
+# "kurdum", "kapattım" gibi birinci tekil geçmiş zaman: tool çağrılmadan söylenirse uydurma eylemdir
+CLAIMED_ACTION = re.compile(
+    r"\b(kurdum|ayarladım|kapattım|ekledim|sildim|gönderdim|kaydettim|erteledim|iptal ettim|işaretledim|"
+    r"susturdum|hallettim|not ettim|yaptım|değiştirdim)\b", re.IGNORECASE)
+CLAIM_CHECK = ("[Sistem kontrolü] Bu turda hiçbir action tool çağırmadın ama cevabında bir işi yaptığını söylüyorsun. "
+               "İstenen işlem gerekiyorsa şimdi ilgili tool'u çağır. Gerekmiyorsa ya da yapamıyorsan bunu açıkça söyle; "
+               "yapılmamış bir işi yapıldı diye anlatma.")
 MODEL_PREFERENCE = {"deepseek": ("deepseek-chat",), "xai": ("grok-4.3", "grok-4.20-non-reasoning", "grok")}
 
 SYSTEM = """Sen bir üniversite öğrencisinin e-Kampüs asistanısın ve bu Telegram botunun kendisisin (İstanbul Ticaret
@@ -47,6 +54,13 @@ Botu yönetmek (bu araçlar sana verildiyse):
   Öğrenciye aracın döndürdüğü zamanı söyle. Araç hata dönerse düzeltip tekrar dene ya da nedenini söyle.
 - Yaptığını tek cümleyle söyle. Cevabın altına "Yapılanlar" listesini sistem kendisi ekler; sen böyle bir liste
   yazma. Bir aracı aynı bilgiyle iki kez çağırma.
+- Bir tool çağırıp başarılı sonuç almadan "kurdum", "yaptım", "kapattım" deme. Her istek için tool'u o turda çağır;
+  önceki turda yaptığını varsayma.
+- Öğrenci hatırlatmanın Pushover'dan gelmesini isterse remind_me'yi channel=pushover (ya da both) ile çağır. Tool
+  sonucunda "kanal" ne yazıyorsa onu söyle; "uyarı" dönerse öğrenciye aynen ilet.
+- Hatırlatma için zaman söylenmemişse tahmin etme, öğrenciye sor. Var olan bir hatırlatmanın saatini ya da kanalını
+  değiştirme isteğinde ("15 dk sonra olsun", "mesaj olarak da gelsin") list_reminders ile bul ve update_reminder kullan;
+  aynı iş için ikinci hatırlatma kurma.
 - "Yenile", "yeni bir şey var mı bak" gibi isteklerde refresh_now çağır ve gelenleri tek tek söyle.
 - Riskli eylemleri (kapatma, susturma, silme) bir güvenlik kontrolü denetler. "Güvenlik kontrolü durdurdu" dönerse
   aynı eylemi tekrar deneme; öğrenciye tam olarak ne yapmak istediğini sor.
@@ -227,11 +241,28 @@ class Assistant:
             reply = "Cevabı tamamlayamadım ama istediklerini yaptım."  # eylemler gerçekleşti; kullanıcı bilmeli
         # Model geçmişteki listeyi taklit edip kendi "Yapılanlar"ını yazabilir; listeyi sadece kod yazar
         reply = ACTIONS_BLOCK.split(reply or "", maxsplit=1)[0].rstrip()
+        if self._claims_unperformed_action(reply, turn):
+            # Gerçek modelde görüldü: tool çağırmadan "hatırlatmayı kurdum" dedi. Bir kez düzelttir.
+            messages += [{"role": "assistant", "content": reply}, {"role": "user", "content": CLAIM_CHECK}]
+            try:
+                retry = await self._complete(messages, turn=turn, kind="sohbet düzeltme", question=text)
+                reply = ACTIONS_BLOCK.split(retry or "", maxsplit=1)[0].rstrip() or reply
+            except Exception as e:  # noqa: BLE001 - düzeltme yapılamazsa aşağıdaki not yine eklenir
+                log.warning("Düzeltme turu başarısız: %s", e)
+            if self._claims_unperformed_action(reply, turn):
+                reply += "\n\n(Not: Bu cevapta hiçbir işlem yapılmadı.)"
         if turn.actions:
             reply = (reply or "Tamam.") + "\n\nYapılanlar:\n" + "\n".join(f"• {a}" for a in turn.actions)
         self.store.chat_add("user", text, now, keep=keep)
         self.store.chat_add("assistant", reply, now, keep=keep)  # model sonraki soruda ne yaptığını hatırlar
         return AgentReply(reply, turn)
+
+    @staticmethod
+    def _claims_unperformed_action(reply: str, turn: Turn) -> bool:
+        """Hiçbir action/dosya yokken cevap birinci tekil geçmiş zamanla bir iş yaptığını söylüyor mu?"""
+        nothing_done = not (turn.actions or turn.files or turn.attachments or turn.resend or turn.digest
+                            or turn.force_flush)
+        return nothing_done and bool(CLAIMED_ACTION.search(reply or ""))
 
     async def answer(self, text: str) -> str:
         return (await self.chat(text)).text

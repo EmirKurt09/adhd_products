@@ -56,6 +56,10 @@ def when(dt: datetime, tz, now: datetime) -> str:
 EVENT_LABEL = {"new": "yeni", "due_changed": "tarih değişti", "changed": "güncellendi",
                "scope_added": "yeni ders izlemeye alındı"}
 
+# Kişisel hatırlatmanın gideceği yer
+CHANNEL_LABEL = {"telegram": "Telegram", "pushover": "Pushover", "both": "Telegram + Pushover"}
+CHANNEL_PARAM = {"type": "string", "enum": list(CHANNEL_LABEL)}
+
 # Ajanın açıp kapatabildiği bildirim ayarları
 SETTING_KEYS = [key for key, _ in PR.CATEGORIES] + ["night"]
 SETTING_LABELS = dict(PR.CATEGORIES) | {"night": "Gece modu"}
@@ -330,7 +334,8 @@ class Toolbox:
     def _list_reminders(self, args: dict, turn: Turn) -> list[dict]:
         now = datetime.now(timezone.utc)
         return [{"id": n["id"], "zaman": fmt_dt(M.parse_dt(n["at"]), self.s.tz, now),
-                 "kalan": remaining(M.parse_dt(n["at"]), now), "metin": n["text"]} for n in self.store.notes_pending()]
+                 "kalan": remaining(M.parse_dt(n["at"]), now), "metin": n["text"],
+                 "kanal": CHANNEL_LABEL[n.get("channel", "telegram")]} for n in self.store.notes_pending()]
 
     def _upcoming_reminders(self, args: dict, turn: Turn) -> list[dict]:
         now = datetime.now(timezone.utc)
@@ -354,7 +359,8 @@ class Toolbox:
         for note in self.store.notes_pending():
             at = M.parse_dt(note["at"])
             if at and at <= end:
-                planned.append((at, {"tür": "kişisel hatırlatma", "başlık": note["text"], "id": note["id"]}))
+                planned.append((at, {"tür": "kişisel hatırlatma", "başlık": note["text"], "id": note["id"],
+                                     "kanal": CHANNEL_LABEL[note.get("channel", "telegram")]}))
         planned.sort(key=lambda p: p[0])
         return [{"zaman": when(at, self.s.tz, now), **entry} for at, entry in planned[:60]]
 
@@ -475,10 +481,17 @@ class Toolbox:
                  params({"text": {"type": "string"}}, ["text"]), self._remember, writes=True),
             Tool("forget", "Hafızadaki bir notu siler (eskidiyse ya da öğrenci isterse). id sistem talimatındaki #numara.",
                  params({"id": {"type": "integer"}}, ["id"]), self._forget, writes=True, risky=always),
-            Tool("remind_me", "Belirli bir zamanda öğrenciye Telegram'dan hatırlatma gönderir (\"yarın 10'da raporu "
-                              "hatırlat\"). Gece ve sessiz modda da gelir.",
-                 params({"at": at, "text": {"type": "string", "description": "Hatırlatma metni, kısa"}}, ["at", "text"]),
+            Tool("remind_me", "Belirli bir zamanda öğrenciye hatırlatma gönderir (\"yarın 10'da raporu hatırlat\"). "
+                              "channel: telegram (varsayılan), pushover (telefona sesli bildirim; öğrenci 'pushover'dan' "
+                              "derse), both (ikisi). Gece ve sessiz modda da gelir.",
+                 params({"at": at, "text": {"type": "string", "description": "Hatırlatma metni, kısa"},
+                         "channel": CHANNEL_PARAM}, ["at", "text"]),
                  self._remind_me, writes=True),
+            Tool("update_reminder", "Kurulu bir hatırlatmanın saatini, kanalını ya da metnini değiştirir. Öğrenci var "
+                                    "olan bir hatırlatma için \"15 dk sonra olsun\", \"mesaj olarak da gelsin\" derse "
+                                    "yeni hatırlatma kurma, bunu kullan. id list_reminders'tan.",
+                 params({"id": {"type": "integer"}, "at": at, "channel": CHANNEL_PARAM,
+                         "text": {"type": "string"}}, ["id"]), self._update_reminder, writes=True),
             Tool("cancel_reminder", "Kurulmuş bir hatırlatmayı iptal eder; id list_reminders'tan.",
                  params({"id": {"type": "integer"}}, ["id"]), self._cancel_reminder, writes=True, risky=always),
             Tool("snooze", "Hatırlatmayı erteler. id verilirse kurulu kişisel hatırlatmayı ileri alır; verilmezse az önce "
@@ -488,8 +501,8 @@ class Toolbox:
             Tool("remind_before_due", "Bir ödevin teslimine belirli bir süre kala ek hatırlatma kurar (\"bu ödev için 1 "
                                       "saat kala da hatırlat\"). Zamanı kod hesaplar; hours_before ondalık olabilir "
                                       "(0.5 = 30 dk).",
-                 params({"uid": {"type": "string"}, "hours_before": {"type": "number", "minimum": 0.1, "maximum": 720}},
-                        ["uid", "hours_before"]), self._remind_before_due, writes=True),
+                 params({"uid": {"type": "string"}, "hours_before": {"type": "number", "minimum": 0.1, "maximum": 720},
+                         "channel": CHANNEL_PARAM}, ["uid", "hours_before"]), self._remind_before_due, writes=True),
             Tool("mute_assignment_reminders", "Bir ödevin otomatik teslim hatırlatmalarını susturur ya da geri açar "
                                               "(ödev teslim edilmiş sayılmaz).",
                  params({"uid": {"type": "string"}, "muted": {"type": "boolean"}}, ["uid", "muted"]),
@@ -614,11 +627,42 @@ class Toolbox:
             return {"hata": "en fazla 1 yıl sonrasına hatırlatma kurulabilir"}
         if len(self.store.notes_pending()) >= NOTES_MAX:
             return {"hata": f"en fazla {NOTES_MAX} hatırlatma kurulabilir; önce birini iptal et"}
-        note_id, new = engine.schedule_note(text, at, now)
+        channel, warning = self._channel(args)
+        note_id, new = engine.schedule_note(text, at, now, channel=channel)
         if new:
-            turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {text}")
+            turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {text} · {CHANNEL_LABEL[channel]}")
         # Aynısı zaten kuruluysa da sonuç aynıdır: o saatte hatırlatma gelecek
-        return {"durum": "tamam", "id": note_id, "zaman": when(at, self.s.tz, now)}
+        out = {"durum": "tamam", "id": note_id, "zaman": when(at, self.s.tz, now), "kanal": CHANNEL_LABEL[channel]}
+        return out | ({"uyarı": warning} if warning else {})
+
+    def _channel(self, args: dict) -> tuple[str, str | None]:
+        """İstenen kanal; Pushover istenip kullanılamıyorsa Telegram'a düşer ve bu açıkça söylenir."""
+        channel = args.get("channel") or "telegram"
+        if channel not in CHANNEL_LABEL:
+            channel = "telegram"
+        if channel != "telegram" and not (self.engine and self.engine.pushover_ready()):
+            reason = features.state(self.s, self.store, "pushover").describe()
+            return "telegram", f"Pushover {reason}; hatırlatma Telegram'dan gelecek. Öğrenciye bunu söyle."
+        return channel, None
+
+    def _update_reminder(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        note_id = int(args["id"])
+        if not any(n["id"] == note_id for n in self.store.notes_pending()):
+            return {"hata": "bu numarada kurulu hatırlatma yok"}
+        at = parse_local(args["at"], self.s.tz, now) if args.get("at") else None
+        if at is not None and not now < at <= now + NOTE_MAX_AHEAD:
+            return {"hata": "zaman gelecekte ve en fazla 1 yıl sonra olmalı"}
+        channel, warning = self._channel(args) if args.get("channel") else (None, None)
+        text = " ".join(str(args.get("text") or "").split())[:300] or None
+        if at is None and channel is None and text is None:
+            return {"hata": "değiştirilecek bir şey verilmedi (at, channel ya da text)"}
+        payload = self.store.update_note(note_id, at=at, channel=channel, text=text)
+        new_at = M.parse_dt(payload["at"])
+        label = CHANNEL_LABEL[payload.get("channel", "telegram")]
+        turn.actions.append(f"Hatırlatma güncellendi: {fmt_dt(new_at, self.s.tz, now)} · {payload['text']} · {label}")
+        out = {"durum": "tamam", "id": note_id, "zaman": when(new_at, self.s.tz, now), "kanal": label}
+        return out | ({"uyarı": warning} if warning else {})
 
     def _cancel_reminder(self, args: dict, turn: Turn) -> dict:
         note_id = int(args["id"])
@@ -648,13 +692,14 @@ class Toolbox:
             if last is None:
                 return {"hata": "son 12 saatte gelmiş bir hatırlatma yok"}
             payload = json.loads(last["payload"])
+            channel = payload.get("channel", "telegram") if last["type"] == "note" else "telegram"
             if last["type"] == "note":
                 text = payload["text"]
             else:
                 due = M.parse_dt(payload.get("due_at"))
                 label = "Canlı ders" if last["type"] == "live_soon" else "Teslim"
                 text = f"{label}: {payload.get('title')} ({payload.get('course')}) · {when(due, self.s.tz, at)}"
-            engine.schedule_note(text, at, now)
+            engine.schedule_note(text, at, now, channel=channel)
         turn.actions.append(f"Ertelendi: {text} → {fmt_dt(at, self.s.tz, now)}")
         return {"durum": "tamam", "zaman": when(at, self.s.tz, now), "metin": text}
 
@@ -670,10 +715,13 @@ class Toolbox:
             return {"hata": f"teslime zaten {remaining(item['due'], now)}; bu zaman geçti"}
         span = f"{int(hours * 60)} dk" if hours < 1 else f"{hours:g} saat"
         text = f"{item['title']} ({item['course']}) teslimine {span} kaldı · {fmt_dt(item['due'], self.s.tz, at)}"
-        note_id, new = engine.schedule_note(text, at, now)
+        channel, warning = self._channel(args)
+        note_id, new = engine.schedule_note(text, at, now, channel=channel)
         if new:
-            turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {item['title']} ({span} kala)")
-        return {"durum": "tamam", "id": note_id, "zaman": when(at, self.s.tz, now)}
+            turn.actions.append(f"Hatırlatma kuruldu: {fmt_dt(at, self.s.tz, now)} · {item['title']} ({span} kala) · "
+                                f"{CHANNEL_LABEL[channel]}")
+        out = {"durum": "tamam", "id": note_id, "zaman": when(at, self.s.tz, now), "kanal": CHANNEL_LABEL[channel]}
+        return out | ({"uyarı": warning} if warning else {})
 
     def _mute_assignment_reminders(self, args: dict, turn: Turn) -> dict:
         item = self.store.item("assignment", str(args["uid"]))
