@@ -34,6 +34,8 @@ async def run(settings: Settings) -> int:
         add(FAIL, "Veri dizini", f"{settings.data_dir} yazılamıyor: {e}")
 
     for group in GROUPS:
+        if group == "pushover":
+            continue  # isteğe bağlı; aşağıda ayrıca kontrol edilir
         missing = settings.missing(group)
         add(OK if not missing else WARN, f".env [{group}]", "tamam" if not missing else f"eksik: {', '.join(missing)}")
 
@@ -41,6 +43,7 @@ async def run(settings: Settings) -> int:
     _check_guard(settings, add)
     await _check_telegram(settings, add)
     await _check_llm(settings, add)
+    await _check_pushover(settings, add)
 
     failed = [r for r in results if r[0] == FAIL]
     print()
@@ -127,3 +130,24 @@ async def _check_llm(settings: Settings, add) -> None:
         add(WARN, "LLM modeli", "LLM_MODEL boş; yukarıdakilerden birini seç")
     else:
         add(OK, "LLM modeli", settings.llm_model)
+
+
+async def _check_pushover(settings: Settings, add) -> None:
+    missing = settings.missing("pushover")
+    if len(missing) == 2:
+        add(SKIP, "Pushover", "ayarlı değil; sistem uyarıları Telegram'a gider")
+        return
+    if missing:
+        add(FAIL, "Pushover", f"eksik: {', '.join(missing)}")
+        return
+    from .pushover import Pushover, PushoverError
+
+    try:
+        devices = await Pushover(settings.pushover_app_token, settings.pushover_user_key).validate()
+    except PushoverError as e:
+        add(FAIL, "Pushover", f"anahtarlar geçersiz: {e}")
+        return
+    except Exception as e:  # noqa: BLE001 - doctor her hatayı raporlamalı
+        add(FAIL, "Pushover", f"erişilemiyor: {type(e).__name__}: {e}")
+        return
+    add(OK, "Pushover", f"anahtarlar geçerli, cihazlar: {devices}")

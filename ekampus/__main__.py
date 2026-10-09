@@ -136,6 +136,16 @@ async def _setup_telegram(settings: Settings) -> int:
 
 
 async def _test_notify(settings: Settings, event: str) -> int:
+    if event == "pushover":
+        from .pushover import make_pushover
+
+        pushover = make_pushover(settings)
+        if pushover is None:
+            print("Pushover ayarlı değil: .env'e PUSHOVER_APP_TOKEN ve PUSHOVER_USER_KEY yaz.")
+            return 1
+        await pushover.send("<b>Deneme:</b> sistem uyarıları bu kanaldan gelecek.", priority=0)
+        print("Pushover'a gönderildi.")
+        return 0
     settings.require("telegram")
     if event == "odev":
         return _enqueue_sample_assignment(settings)
@@ -209,8 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--dry-run", action="store_true", help="sadece oku ve göster, durumu değiştirme")
     sub.add_parser("setup-telegram", help="bota yazan chat'lerin kimliğini göster")
     test = sub.add_parser("test-notify", help="Telegram'a deneme bildirimi gönder")
-    test.add_argument("--olay", choices=["mesaj", "odev"], default="mesaj",
-                      help="mesaj: düz deneme mesajı; odev: [TEST] başlıklı yeni ödev bildirimi (bot üzerinden)")
+    test.add_argument("--olay", choices=["mesaj", "odev", "pushover"], default="mesaj",
+                      help="mesaj: düz deneme mesajı; odev: [TEST] başlıklı yeni ödev bildirimi (bot üzerinden); "
+                           "pushover: Pushover'a deneme uyarısı")
     sub.add_parser("bot", help="Telegram botunu ve izlemeyi başlat (sürekli çalışır)")
     sub.add_parser("health", help="konteyner sağlık kontrolü")
     args = parser.parse_args(argv)

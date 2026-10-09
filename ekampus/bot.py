@@ -44,6 +44,8 @@ from .config import Settings
 from .engine import Download, Engine, NotAFile, describe_failure, utcnow
 from .llm import Assistant, make_assistant
 from .lock import InstanceLock
+from .pushover import make_pushover
+from .watchdog import start_watchdog
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -355,6 +357,7 @@ def manager_message(c: Ctx) -> M.Message:
         "parse_problems": sorted(json.loads(c.store.get("parse_streaks", "{}"))),
         "pending": stats["pending"], "sent_24h": c.store.sent_since(now - timedelta(hours=24)),
         "muted_until": c.engine.muted_until(),
+        "alert_channel": "Pushover" if c.s.pushover_enabled else "Telegram (Pushover ayarlı değil)",
     }
     night = f"{c.s.night_start:%H:%M}–{c.s.night_end:%H:%M}"
     return M.alert_manager_view(status, PR.load(c.store), PR.CATEGORIES, c.s.tz, now, night)
@@ -416,6 +419,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         answer = await asyncio.wait_for(c.assistant.answer(text), timeout=90)
     except Exception as e:  # noqa: BLE001 - LLM hatası kullanıcıya düzgün söylenir, bot çalışmaya devam eder
         log.warning("LLM yanıtı alınamadı: %s", e)
+        c.engine.record_error("llm", f"{type(e).__name__}: {e}")
         await reply(update, M.Message("Şu an LLM'e ulaşamadım. Komutlar çalışıyor: /odevler, /bugun, /notlar"))
         return
     await reply(update, M.Message(escape(answer or "…")))
@@ -627,6 +631,7 @@ async def _tldr(context, c: Ctx, data: dict, reply_to: int) -> None:
         summary = await asyncio.wait_for(c.assistant.tldr(data), timeout=60)
     except Exception as e:  # noqa: BLE001 - özet "en iyi çaba"dır
         log.info("TL;DR üretilemedi: %s", e)
+        c.engine.record_error("llm", f"özet: {type(e).__name__}: {e}")
         return
     if summary:
         await context.bot.send_message(c.s.telegram_owner_chat_id, f"<b>Kısaca</b>\n{escape(summary)}",
@@ -656,6 +661,7 @@ async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 message.text += f"\n\n<b>Bugünün planı</b>\n{escape(plan)}"
         except Exception as e:  # noqa: BLE001 - özet planı "en iyi çaba"dır
             log.info("Günlük plan üretilemedi: %s", e)
+            c.engine.record_error("llm", f"sabah planı: {type(e).__name__}: {e}")
     await send(context.bot, c.s.telegram_owner_chat_id, message)
 
 
@@ -720,6 +726,9 @@ async def on_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Bot hatası: %s", context.error, exc_info=context.error)
+    c: Ctx | None = context.application.bot_data.get("ctx")
+    if c is not None:
+        c.engine.record_error("bot", f"{type(context.error).__name__}: {context.error}")
 
 
 async def setup_mode_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -742,7 +751,8 @@ def build_app(settings: Settings) -> Application:
         return app
 
     store = Store(settings.db_path)
-    engine = Engine(settings, store)
+    pushover = make_pushover(settings)
+    engine = Engine(settings, store, alert_channel=pushover.send if pushover else None)
     app.bot_data["ctx"] = Ctx(settings, store, engine, make_assistant(settings, store))
     owner = owner_filter(settings.telegram_owner_chat_id)
 
@@ -777,6 +787,7 @@ async def _post_init(app: Application) -> None:
         return
     await app.bot.set_my_commands([BotCommand(n, d) for n, d in COMMANDS],
                                   scope=BotCommandScopeChat(ctx.s.telegram_owner_chat_id))
+    ctx.engine.on_start()  # önceki çalışma çöktüyse ya da takıldıysa uyarı kuyruğa girer
     last = M.parse_dt(ctx.store.get("start_notice_at"))
     if last is None or utcnow() - last > timedelta(hours=12):
         try:
@@ -785,6 +796,12 @@ async def _post_init(app: Application) -> None:
             ctx.store.set("start_notice_at", utcnow().isoformat())
         except TelegramError as e:
             log.warning("Başlangıç mesajı gönderilemedi: %s", e)
+
+
+async def _post_shutdown(app: Application) -> None:
+    ctx: Ctx | None = app.bot_data.get("ctx")
+    if ctx is not None:
+        ctx.engine.on_clean_exit()  # düzgün kapanış: sonraki açılışta "çökme" uyarısı verilmesin
 
 
 def run(settings: Settings) -> int:
@@ -798,7 +815,11 @@ def run(settings: Settings) -> int:
     try:
         app = build_app(settings)
         app.post_init = _post_init
-        log.info("Bot başlıyor (v%s, veri: %s)", __version__, settings.data_dir)
+        app.post_shutdown = _post_shutdown
+        if settings.telegram_owner_chat_id:
+            start_watchdog(settings, make_pushover(settings))
+        log.info("Bot başlıyor (v%s, veri: %s, sistem uyarıları: %s)", __version__, settings.data_dir,
+                 "Pushover" if settings.pushover_enabled else "Telegram")
         app.run_polling(allowed_updates=["message", "callback_query", "my_chat_member"])
     finally:
         lock.release()
