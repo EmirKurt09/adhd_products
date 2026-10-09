@@ -5,3 +5,4 @@ python-dotenv==1.2.4
 beautifulsoup4==4.15.0
 httpx==0.28.1
 tzdata==2026.5
+pypdf==6.19.0

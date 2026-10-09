@@ -11,13 +11,14 @@ kullanıcı neyin değiştiğini görür.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
-from . import features
+from . import documents, features
 from . import messages as M
 from . import prefs as PR
 from .browser import AuthGuard
@@ -71,6 +72,7 @@ class Turn:
     mode: str = "chat"
     actions: list[str] = field(default_factory=list)  # kullanıcıya gösterilecek "Yapılanlar"
     files: list[str] = field(default_factory=list)    # cevaptan sonra gönderilecek materyallerin uid'leri
+    attachments: list[tuple[str, int]] = field(default_factory=list)  # gönderilecek ödev ekleri (ödev uid, ek no)
     flush: bool = False                               # bekleyen bildirimler hemen gönderilsin mi
 
 
@@ -80,7 +82,12 @@ class Tool:
     description: str
     parameters: dict
     handler: Callable[[dict, Turn], Any]  # senkron ya da async
-    writes: bool = False
+    writes: bool = False      # botun durumunu değiştirir ya da sohbete bir şey gönderir
+    chat_only: bool = False   # durum değiştirmez ama siteye gider (yavaş); bulgu değerlendirmesinde yok
+
+    @property
+    def needs_chat(self) -> bool:
+        return self.writes or self.chat_only
 
     def spec(self) -> dict:
         return {"type": "function", "function": {"name": self.name, "description": self.description,
@@ -113,7 +120,8 @@ class Toolbox:
         self.store = store
         self.engine = engine
         self.notifier = notifier if notifier is not None else engine
-        self.tools: dict[str, Tool] = {t.name: t for t in self._read_tools() + self._write_tools()}
+        self.tools: dict[str, Tool] = {
+            t.name: t for t in self._read_tools() + self._site_tools() + self._write_tools()}
 
     # ── Araç listesi ──────────────────────────────────────────────────────
     def notify_left(self) -> int:
@@ -121,7 +129,7 @@ class Toolbox:
 
     def specs(self, mode: str) -> list[dict] | None:
         """Moda göre araç şemaları. Uyarı aracı sadece kullanılabilirken (kanal var, açık, hak kalmış) sunulur."""
-        specs = [t.spec() for t in self.tools.values() if mode == "chat" or not t.writes]
+        specs = [t.spec() for t in self.tools.values() if mode == "chat" or not t.needs_chat]
         left = self.notify_left()
         if left > 0:
             specs.append(notify_tool(left))
@@ -139,7 +147,7 @@ class Toolbox:
         tool = self.tools.get(name)
         if tool is None:
             return {"hata": f"bilinmeyen araç: {name}"}
-        if tool.writes and turn.mode != "chat":
+        if tool.needs_chat and turn.mode != "chat":
             return {"hata": "bu araç burada kullanılamaz"}
         result = tool.handler(args, turn)
         return await result if inspect.isawaitable(result) else result
@@ -147,7 +155,7 @@ class Toolbox:
     def run_read(self, name: str, args: dict) -> Any:
         """Okuma araçlarını senkron çalıştırır (sabah planı ve testler için)."""
         tool = self.tools.get(name)
-        if tool is None or tool.writes:
+        if tool is None or tool.needs_chat:
             return {"hata": f"bilinmeyen araç: {name}"}
         return tool.handler(args, Turn(mode="triage"))
 
@@ -197,6 +205,7 @@ class Toolbox:
             out["not"] = d["extra"].get("value")
         if d["kind"] == "file":
             out["bölüm"] = d["extra"].get("section")
+            out["biçim"] = M.format_label(d["extra"].get("icon"))
             out["görüldü"] = d["meta"].get("viewed")
         if body and d.get("body"):
             out["metin"] = d["body"][:3000]
@@ -274,6 +283,75 @@ class Toolbox:
         return [{"id": n["id"], "zaman": fmt_dt(M.parse_dt(n["at"]), self.s.tz, now),
                  "kalan": remaining(M.parse_dt(n["at"]), now), "metin": n["text"]} for n in self.store.notes_pending()]
 
+    # ── Siteye giden araçlar (sadece sohbet; durum değiştirmez) ───────────
+    def _site_tools(self) -> list[Tool]:
+        return [
+            Tool("assignment_details", "Ödev sayfasını siteden canlı açar: tam açıklama, dosya sınırı, teslim durumu ve "
+                                       "ekler (no, ad, PDF mi). uid list_assignments'tan.",
+                 params({"uid": {"type": "string"}}, ["uid"]), self._assignment_details, chat_only=True),
+            Tool("read_document", "Bir PDF'yi açıp metnini okur; içinden soru cevaplamak ya da özetlemek için. "
+                                  "source=material: ders materyali (uid list_files'tan; sitede 'görüldü' sayılır). "
+                                  "source=attachment: ödev eki (uid ödevin uid'si, no assignment_details'ten). Uzun "
+                                  "belgede cevaptaki 'devamı' değeriyle page_from vererek sonraki sayfaları oku.",
+                 params({"source": {"type": "string", "enum": ["material", "attachment"]},
+                         "uid": {"type": "string"}, "no": {"type": "integer"},
+                         "page_from": {"type": "integer", "minimum": 1}}, ["source", "uid"]),
+                 self._read_document, chat_only=True),
+        ]
+
+    async def _assignment_details(self, args: dict, turn: Turn) -> dict:
+        engine = self._need_engine()
+        uid = str(args["uid"])
+        item = self.store.item("assignment", uid)
+        if not item:
+            return {"hata": "ödev bulunamadı"}
+        detail = await engine.assignment_detail(uid)
+        self.store.set(f"att:{uid}", json.dumps(detail.attachments, ensure_ascii=False))
+        out = self._brief(item)
+        out.update({"açıklama": (detail.description or item["body"] or "")[:4000], "dosya_sınırı": detail.limit or None,
+                    "ekler": [{"no": i, "ad": name, "pdf": name.lower().endswith(".pdf") or url.lower().split("?")[0].endswith(".pdf")}
+                              for i, (name, url) in enumerate(detail.attachments)]})
+        if any(e["pdf"] for e in out["ekler"]):
+            out["not"] = "PDF ek var; öğrenciye istersen okuyup içinden sorularını cevaplayabileceğini teklif et"
+        return out
+
+    def _attachment(self, uid: str, no: int) -> tuple[str, str] | None:
+        attachments = json.loads(self.store.get(f"att:{uid}", "[]"))
+        return tuple(attachments[no]) if 0 <= no < len(attachments) else None
+
+    async def _read_document(self, args: dict, turn: Turn) -> dict:
+        engine = self._need_engine()
+        source, uid, no = args.get("source", "material"), str(args["uid"]), int(args.get("no") or 0)
+        if source == "material":
+            item = self.store.item("file", uid)
+            if not item:
+                return {"hata": "materyal bulunamadı"}
+            key, title = f"material:{uid}:{item['fingerprint']}", item["title"]
+        else:
+            if self._attachment(uid, no) is None:
+                await self._assignment_details({"uid": uid}, turn)  # ek listesi henüz alınmadıysa
+            attachment = self._attachment(uid, no)
+            if attachment is None:
+                return {"hata": "bu numarada ek yok"}
+            key, title = f"attachment:{uid}:{no}:{attachment[1]}", attachment[0]
+        cached = self.store.doc_get(key)
+        if cached is None:
+            download = await (engine.fetch_material(uid) if source == "material" else engine.download(attachment[1], title))
+            if download.body is None:
+                return {"hata": "dosya 50 MB'tan büyük, okunamıyor"}
+            if not documents.is_pdf(download.body, download.filename):
+                return {"hata": "şimdilik sadece PDF okunabiliyor", "dosya": download.filename}
+            pages = await asyncio.to_thread(documents.pdf_pages, download.body)
+            self.store.doc_put(key, title, pages, datetime.now(timezone.utc))
+            cached = {"title": title, "pages": pages}
+        pages = cached["pages"]
+        if not any(p.strip() for p in pages):
+            return {"hata": "PDF'te okunabilir metin yok (taranmış bir belge olabilir)", "sayfa_sayısı": len(pages)}
+        start = int(args.get("page_from") or 1)
+        text, last = documents.window(pages, start)
+        return {"başlık": cached["title"], "sayfa_sayısı": len(pages), "okunan_sayfalar": f"{min(start, last)}-{last}",
+                "metin": text, "devamı": last + 1 if last < len(pages) else None}
+
     # ── Yazma araçları (sadece sohbet modunda) ───────────────────────────
     def _write_tools(self) -> list[Tool]:
         at = {"type": "string", "description": f"{TIME_FORMAT}, ör. 2026-10-10 18:00"}
@@ -315,6 +393,9 @@ class Toolbox:
                               "dosya için her biri ayrı çağrı (bir cevapta en fazla 10). Materyal sitede açıldığı için "
                               "'görüldü' sayılır.",
                  params({"uid": {"type": "string"}}, ["uid"]), self._send_file, writes=True),
+            Tool("send_attachment", "Bir ödevin ekini dosya olarak sohbete gönderir; no assignment_details'ten.",
+                 params({"uid": {"type": "string"}, "no": {"type": "integer"}}, ["uid", "no"]),
+                 self._send_attachment, writes=True),
             Tool("refresh_now", "e-Kampüs'ü hemen kontrol eder (\"sayfayı yenile\", \"yeni bir şey var mı bak\"); yarım "
                                 "dakika kadar sürebilir. Yeni gelen ya da değişen her şeyi döndürür; öğrenciye tek tek "
                                 "söyle. Bildirimleri de ayrıca gelir.", params(), self._refresh_now, writes=True),
@@ -429,11 +510,27 @@ class Toolbox:
             return {"hata": "materyal bulunamadı"}
         if item["uid"] in turn.files:
             return {"durum": "zaten gönderilecek"}
-        if len(turn.files) >= FILES_PER_TURN:
+        if len(turn.files) + len(turn.attachments) >= FILES_PER_TURN:
             return {"hata": f"bir seferde en fazla {FILES_PER_TURN} dosya; gerisini /dosyalar'dan seçebilir"}
         turn.files.append(item["uid"])
         turn.actions.append(f"Dosya gönderiliyor: {item['title']}")
-        return {"durum": "cevaptan hemen sonra gönderilecek", "dosya": item["title"]}
+        out = {"durum": "cevaptan hemen sonra gönderilecek", "dosya": item["title"]}
+        if M.format_label(item["extra"].get("icon")) == "PDF":
+            out["not"] = "PDF; öğrenciye istersen okuyup içinden sorularını cevaplayabileceğini teklif et"
+        return out
+
+    def _send_attachment(self, args: dict, turn: Turn) -> dict:
+        uid, no = str(args["uid"]), int(args["no"])
+        attachment = self._attachment(uid, no)
+        if attachment is None:
+            return {"hata": "ek bulunamadı; önce assignment_details çağır"}
+        if (uid, no) in turn.attachments:
+            return {"durum": "zaten gönderilecek"}
+        if len(turn.files) + len(turn.attachments) >= FILES_PER_TURN:
+            return {"hata": f"bir seferde en fazla {FILES_PER_TURN} dosya"}
+        turn.attachments.append((uid, no))
+        turn.actions.append(f"Ek gönderiliyor: {attachment[0]}")
+        return {"durum": "cevaptan hemen sonra gönderilecek", "dosya": attachment[0]}
 
     async def _refresh_now(self, args: dict, turn: Turn) -> dict:
         engine = self._need_engine()

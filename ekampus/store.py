@@ -78,11 +78,18 @@ CREATE TABLE IF NOT EXISTS memory (
     text TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS documents (
+    key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    pages TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 LLM_LOG_KEEP = 30
 MEMORY_MAX = 50        # kalıcı hafızadaki en fazla not (her LLM çağrısına eklendiği için sınırlı)
 MEMORY_TEXT_MAX = 300
+DOCUMENTS_KEEP = 20    # okunmuş PDF metinlerinin önbelleği (tekrar sorulunca siteye gitmemek için)
 
 MAX_BACKOFF = timedelta(minutes=30)
 
@@ -361,6 +368,22 @@ class Store:
     def memory_clear(self) -> int:
         with self.db:
             return self.db.execute("DELETE FROM memory").rowcount
+
+    # ── Okunmuş belgeler (PDF metni, sayfa sayfa) ─────────────────────────
+    def doc_get(self, key: str) -> dict | None:
+        row = self.db.execute("SELECT title, pages FROM documents WHERE key = ?", (key,)).fetchone()
+        return {"title": row["title"], "pages": json.loads(row["pages"])} if row else None
+
+    def doc_put(self, key: str, title: str, pages: list[str], now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO documents (key, title, pages, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET title = excluded.title, pages = excluded.pages, "
+                "created_at = excluded.created_at",
+                (key, title, json.dumps(pages, ensure_ascii=False), _ts(now)),
+            )
+            self.db.execute(f"DELETE FROM documents WHERE key NOT IN "
+                            f"(SELECT key FROM documents ORDER BY created_at DESC LIMIT {DOCUMENTS_KEEP})")
 
     # ── LLM kayıtları (/llmlog) ───────────────────────────────────────────
     def llm_log_add(self, trace: dict, now: datetime) -> int:

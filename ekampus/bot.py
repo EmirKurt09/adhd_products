@@ -459,18 +459,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
         await cmd_help(update, context)  # yardım metni LLM'in neden çalışmadığını da söyler
         return
-    # Ajan: araçlarla bakar, gerekirse botu yönetir (sessiz mod, ayarlar, hatırlatma, hafıza, dosya)
-    await update.effective_chat.send_action(ChatAction.TYPING)
+    await run_agent(update.effective_chat.id, text, context)
+
+
+async def run_agent(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ajan: araçlarla bakar, gerekirse botu yönetir; cevaptan sonra istediği dosyaları gönderir."""
+    c = deps(context)
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
     try:
-        result = await asyncio.wait_for(c.assistant.chat(text), timeout=120)
+        result = await asyncio.wait_for(c.assistant.chat(text), timeout=150)
     except Exception as e:  # noqa: BLE001 - LLM hatası kullanıcıya düzgün söylenir, bot çalışmaya devam eder
         log.warning("LLM yanıtı alınamadı: %s", e)
         c.engine.record_error("llm", f"{type(e).__name__}: {e}")
-        await reply(update, M.Message("Şu an LLM'e ulaşamadım. Komutlar çalışıyor: /odevler, /bugun, /notlar"))
+        await send(context.bot, chat_id, M.Message("Şu an LLM'e ulaşamadım. Komutlar çalışıyor: /odevler, /bugun, /notlar"))
         return
-    await reply(update, M.Message(escape(result.text or "…")))
+    await send(context.bot, chat_id, M.Message(escape(result.text or "…")))
     for uid in result.files:
-        await send_material(update.effective_chat.id, uid, context)
+        await send_material(chat_id, uid, context)
+    for uid, index in result.attachments:
+        await send_attachment(chat_id, uid, index, context)
     if result.flush:  # sessiz mod kapandı ya da site yenilendi: bekleyenler hemen gelsin
         await flush_job(context)
 
@@ -570,6 +577,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _edit(query, materials_menu(c))
         else:
             await _edit(query, materials_menu(c, course_id, int(page or 0)))
+    elif action == "rd":
+        await query.answer("Okuyorum…")
+        source, _, rest = arg.partition(":")
+        if source == "m":
+            item = c.store.item("file", rest)
+            name = item["title"] if item else rest
+            prompt = f"“{name}” materyalini (source=material, uid={rest}) oku"
+        else:
+            uid, _, index = rest.partition(":")
+            prompt = f"{uid} numaralı ödevin {index} numaralı ekini (source=attachment, uid={uid}, no={index}) oku"
+        await run_agent(update.effective_chat.id, prompt + "; 4-5 maddede ne anlattığını söyle ve içinden soru "
+                        "sorabileceğimi belirt.", context)
     elif action == "att":
         await query.answer("Eki indiriyorum…")
         uid, _, index = arg.partition(":")
@@ -639,7 +658,8 @@ async def send_material(chat_id: int, uid: str, context: ContextTypes.DEFAULT_TY
     cached = c.store.get(cache_key)
     if cached:  # daha önce gönderildi: Telegram'daki kopyayı yolla, siteye hiç gitme
         try:
-            await context.bot.send_document(chat_id, document=cached, caption=caption)
+            sent = await context.bot.send_document(chat_id, document=cached, caption=caption)
+            await _offer_reading(context, sent, f"rd:m:{uid}")
             return
         except TelegramError as e:
             log.info("Önbellekteki dosya gönderilemedi, yeniden indiriliyor: %s", e)
@@ -658,6 +678,7 @@ async def send_material(chat_id: int, uid: str, context: ContextTypes.DEFAULT_TY
     sent = await _send_file(context, chat_id, download, caption)
     if sent is not None and sent.document is not None:
         c.store.set(cache_key, sent.document.file_id)
+        await _offer_reading(context, sent, f"rd:m:{uid}")
 
 
 async def send_attachment(chat_id: int, uid: str, index: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -673,7 +694,22 @@ async def send_attachment(chat_id: int, uid: str, index: int, context: ContextTy
     except Exception as e:  # noqa: BLE001
         await context.bot.send_message(chat_id, f"Eki indiremedim: {escape(str(e)[:200])}\n{escape(url)}")
         return
-    await _send_file(context, chat_id, download, escape(label))
+    sent = await _send_file(context, chat_id, download, escape(label))
+    await _offer_reading(context, sent, f"rd:a:{uid}:{index}")
+
+
+async def _offer_reading(context, sent, data: str) -> None:
+    """Gönderilen dosya PDF'yse ve LLM açıksa altına "okuyup özetle" butonu koy (dokununca ajan okur)."""
+    document = getattr(sent, "document", None)
+    if document is None or len(data.encode()) > 64 or not deps(context).llm_on():
+        return
+    if document.mime_type != "application/pdf" and not (document.file_name or "").lower().endswith(".pdf"):
+        return
+    try:
+        await context.bot.edit_message_reply_markup(sent.chat_id, sent.message_id, reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Oku ve özetle, soru sorayım", callback_data=data)]]))
+    except TelegramError as e:
+        log.info("Okuma butonu eklenemedi: %s", e)
 
 
 async def _send_file(context, chat_id: int, download: Download, caption: str):

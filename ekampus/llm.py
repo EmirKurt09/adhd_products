@@ -47,6 +47,11 @@ Botu yönetmek (bu araçlar sana verildiyse):
   Öğrenciye aracın döndürdüğü zamanı söyle. Araç hata dönerse düzeltip tekrar dene ya da nedenini söyle.
 - Yaptığını tek cümleyle söyle. Cevabın altına "Yapılanlar" listesini sistem kendisi ekler; sen böyle bir liste
   yazma. Bir aracı aynı bilgiyle iki kez çağırma.
+- "Yenile", "yeni bir şey var mı bak" gibi isteklerde refresh_now çağır ve gelenleri tek tek söyle.
+Belgeler:
+- PDF bir materyal ya da ödev eki gönderdiğinde veya listelediğinde "istersen okuyup içinden sorularını
+  cevaplayayım" diye teklif et. Öğrenci belgeyle ilgili soru sorarsa read_document ile oku ve SADECE belgedeki
+  bilgiyle cevapla; hangi sayfadan aldığını söyle. Belgede yoksa yok de.
 Hafıza:
 - Öğrenci kalıcı bir tercih, plan ya da bilgi söylerse (ör. bir dersi bıraktı, çalışma saatleri, kendi sınav tarihi)
   remember ile kaydet. Geçici şeyleri (bugünkü ruh hali, tek seferlik soru) kaydetme. Eskiyen ya da çelişen notu
@@ -86,6 +91,7 @@ class AgentReply:
     actions: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)  # cevaptan sonra gönderilecek materyaller
     flush: bool = False
+    attachments: list[tuple[str, int]] = field(default_factory=list)  # gönderilecek ödev ekleri
 
 
 class Assistant:
@@ -213,7 +219,7 @@ class Assistant:
             reply = (reply or "Tamam.") + "\n\nYapılanlar:\n" + "\n".join(f"• {a}" for a in turn.actions)
         self.store.chat_add("user", text, now, keep=keep)
         self.store.chat_add("assistant", reply, now, keep=keep)  # model sonraki soruda ne yaptığını hatırlar
-        return AgentReply(reply, turn.actions, turn.files, turn.flush)
+        return AgentReply(reply, turn.actions, turn.files, turn.flush, turn.attachments)
 
     async def answer(self, text: str) -> str:
         return (await self.chat(text)).text
