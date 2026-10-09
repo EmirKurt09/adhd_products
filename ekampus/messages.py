@@ -209,6 +209,9 @@ def render_event(event_type: str, data: dict, tz: ZoneInfo, now: datetime) -> Me
     if event_type == "alert":
         return Message(data.get("text", "Uyarı"))
 
+    if event_type == "explain":
+        return Message(f"<b>Kısaca:</b> {title}{_course(data)}\n{escape(clip(data.get('text', ''), 1500))}", silent=True)
+
     return Message(f"{escape(event_type)}: {title}")
 
 
@@ -447,6 +450,12 @@ def _args_text(args: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in (args or {}).items())
 
 
+DECISION_LABEL = {
+    "requires_submission": "Teslim gerektiriyor", "exam_related": "Sınavla ilgili", "schedule_change": "Tarih değişikliği",
+    "action_required": "Eylem gerekiyor", "needs_explanation": "Açıklama gerekli", "push_now": "Hemen uyar",
+}
+
+
 def llm_log_view(entry: dict, index: int, total: int, tz: ZoneInfo, now: datetime) -> Message:
     """index 0 = en yeni. Modelin hangi araçla neye baktığını ve ne cevap verdiğini gösterir."""
     at = parse_dt(entry.get("created_at"))
@@ -455,7 +464,13 @@ def llm_log_view(entry: dict, index: int, total: int, tz: ZoneInfo, now: datetim
     if entry.get("question"):
         lines.append(f"Soru: <i>{escape(clip(entry['question'], 200))}</i>")
     steps = entry.get("steps", [])
-    if not steps:
+    if entry.get("decisions"):  # JEV kararı: soru başına olasılık ve yapılan eylem
+        lines.append("\n<b>Kararlar</b>")
+        for qid, p in entry["decisions"].items():
+            lines.append(f"• {escape(DECISION_LABEL.get(qid, qid))}: %{round(p * 100)}")
+        if entry.get("actions"):
+            lines.append("Yapılan: " + escape(", ".join(entry["actions"])))
+    elif not steps:
         lines.append("\nAraç çağırmadı; sadece kendisine verilen metinle cevapladı.")
     else:
         lines.append(f"\n<b>Baktığı veriler ({len(steps)} araç çağrısı)</b>")
@@ -486,7 +501,7 @@ def llm_log_list_view(entries: list[dict], tz: ZoneInfo, now: datetime) -> Messa
     buttons = []
     for i, e in enumerate(entries):
         at = parse_dt(e.get("created_at"))
-        tools = ", ".join(dict.fromkeys(s["tool"] for s in e.get("steps", []))) or "araç yok"
+        tools = "JEV" if e.get("decisions") else (", ".join(dict.fromkeys(s["tool"] for s in e.get("steps", []))) or "araç yok")
         state = " · hata" if e.get("error") else ""
         lines.append(f"{i + 1}. {fmt_dt(at, tz, now)} · {escape(e.get('kind', ''))} · {e.get('tokens', 0)} token{state}\n"
                      f"   {escape(clip(e.get('question', ''), 60))} <i>[{escape(tools)}]</i>")

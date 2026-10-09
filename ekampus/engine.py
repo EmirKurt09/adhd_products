@@ -294,6 +294,13 @@ class Engine:
         self.store.set(self._assistant_key(now), str(used))
         return {"durum": "gönderildi", "bugün_kalan_hak": max(0, self.s.llm_alerts_per_day - used)}
 
+    def enqueue_explanation(self, event: Event, text: str, now: datetime | None = None) -> bool:
+        """LLM açıklamasını asıl bildirimden sonra gidecek şekilde kuyruğa koyar (bulgunun kategorisine tabi)."""
+        data = event.data
+        payload = {"kind": data.get("kind"), "uid": data.get("uid"), "title": data.get("title") or data.get("course"),
+                   "course": data.get("course"), "text": text[:2000]}
+        return self.store.enqueue(Event("explain", f"explain:{event.key}", payload), now or utcnow())
+
     def on_clean_exit(self) -> None:
         self.store.set("running", "0")
 
