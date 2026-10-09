@@ -430,3 +430,10 @@ def test_resend_notification(box):
     box.store.mark_sent(outbox_id, now)
     _, turn = call(box, "resend_notification", {"id": outbox_id})
     assert turn.resend == [outbox_id] and turn.actions == ["Tekrar gönderiliyor: Yeni not · Vize"]
+
+
+def test_model_action_list_without_colon_is_removed(box, settings):
+    a = agent(box, settings)
+    a.client, _ = scripted(_response(tool_calls=[_Call("c1", "end_quiet", {})]),
+                           _response(content="Kapattım.\n\nYapılanlar\n• end_quiet çağrıldı"))
+    assert asyncio.run(a.chat("sessizi kapat")).text == "Kapattım.\n\nYapılanlar:\n• Sessiz mod kapatıldı"

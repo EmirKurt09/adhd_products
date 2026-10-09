@@ -24,7 +24,7 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
-ACTIONS_BLOCK = re.compile(r"(?:^|\n)[ \t]*Yapılanlar:")
+ACTIONS_BLOCK = re.compile(r"(?:^|\n)[ \t]*Yapılanlar[ \t]*:?[ \t]*(?=\n|$)")
 MODEL_PREFERENCE = {"deepseek": ("deepseek-chat",), "xai": ("grok-4.3", "grok-4.20-non-reasoning", "grok")}
 
 SYSTEM = """Sen bir üniversite öğrencisinin e-Kampüs asistanısın ve bu Telegram botunun kendisisin (İstanbul Ticaret

@@ -5,7 +5,9 @@ JEV'e iki soru sorulur:
     explicitly_requested  öğrenci bunu (aynı hedef, uyumlu zaman/kapsam) açıkça istedi mi?
     risky                 bu eylem öğrencinin teslim, sınav, not ya da önemli bir duyuruyu kaçırmasına
                           veya kayıtlı bilginin silinmesine yol açabilir mi?
-Karar kodda verilir: açıkça istendiyse yapılır; istenmediği belirsizken riskliyse durdurulur, değilse yapılır.
+Karar kodda verilir: açıkça istendiyse yapılır. İstendiği belli değilse sadece risk çok düşükse yapılır; bu araçlar
+zaten yalnızca öğrenci isteyince çalışmalı (gerçek modelle denemede "bildirimler kalsın" diyen öğrenciye JEV'i kapatma
+eylemi istendi %18, riskli %48 aldı; eşik bu yüzden düşük).
 JEV kapalıysa ya da ulaşılamıyorsa eylem yapılır (bugünkü davranış) ve bu kayda geçer.
 Her kontrol /llmlog'da "JEV eylem kontrolü" olarak görünür.
 """
@@ -23,7 +25,7 @@ from .jev import JevDecision
 log = logging.getLogger(__name__)
 
 REQUESTED_MIN = 0.6
-RISKY_MIN = 0.5
+RISKY_MIN = 0.25
 
 QUESTIONS: dict[str, dict] = {
     "explicitly_requested": {"type": "noul", "instructions": (

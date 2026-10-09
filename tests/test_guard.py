@@ -38,7 +38,7 @@ def call(box, name, args, text="", context=None):
     return asyncio.run(box.call(name, args, turn)), turn
 
 
-@pytest.mark.parametrize("requested,risky,allowed", [(0.9, 0.95, True), (0.3, 0.8, False), (0.3, 0.2, True),
+@pytest.mark.parametrize("requested,risky,allowed", [(0.9, 0.95, True), (0.3, 0.8, False), (0.3, 0.2, True), (0.18, 0.48, False),
                                                      (0.6, 0.99, True), (0.59, 0.5, False)])
 def test_decision(requested, risky, allowed):
     assert decide(JevDecision({"explicitly_requested": requested, "risky": risky})).allowed is allowed
