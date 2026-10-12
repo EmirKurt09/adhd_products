@@ -111,6 +111,15 @@ def render_event(event_type: str, data: dict, tz: ZoneInfo, now: datetime) -> Me
     title = escape(data.get("title", ""))
     due = parse_dt(data.get("due_at"))
 
+    if event_type == "university_notice":
+        lines = [f"<b>Üniversite duyurusu:</b> {title}", f"Tarih: {escape(data.get('published', ''))}"]
+        if data.get("body"):
+            lines.append("\n" + escape(clip(data["body"], 1200)))
+        return Message("\n".join(lines), [_link_row(data)] if _link_row(data) else [])
+
+    if event_type == "university_pdf":
+        return Message(f"<b>Duyuru eki:</b> {title}")
+
     if event_type == "new" and kind == "assignment":
         lines = [f"<b>Yeni ödev:</b> {title}{_course(data)}"]
         lines.append(f"Teslim: <b>{fmt_dt(due, tz, now)}</b>" + (f" · {left(due, now)}" if due else ""))

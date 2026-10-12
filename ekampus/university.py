@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 import hashlib
@@ -154,27 +155,50 @@ class UniversityBrowser:
         return parse_detail(await self.html(url), url)
 
     async def download(self, url: str, title: str) -> Download:
-        # Dosya da Playwright'ın aynı public context'inden alınır; PDF metni çıkarılmaz.
+        # Chromium fetch: APIRequestContext'in ayrı TLS deposunu kullanmaz.
+        # Stream sınırı büyük PDF'yi bütünüyle belleğe almadan link fallback sağlar.
         url = public_url(url)
-        head = await self.context.request.head(url, timeout=30_000)
+        page = await self.context.new_page()
         try:
-            size = int(head.headers.get("content-length", "0") or 0)
-            if head.ok and size > TELEGRAM_FILE_LIMIT:
-                return Download(material_filename(title, url, "application/pdf"), None, url)
-        finally:
-            await head.dispose()
-        response = await self.context.request.get(url, timeout=120_000)
-        try:
-            if not response.ok:
-                raise UniversityError(f"PDF indirilemedi: HTTP {response.status}")
-            public_url(response.url)
-            body = await response.body()
-            if not body.startswith(b"%PDF-"):
+            parts = urlsplit(url)
+            origin = urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
+            await page.goto(SOURCE_URL if origin == "https://ticaret.edu.tr/" else origin,
+                            wait_until="domcontentloaded", timeout=60_000)
+            public_url(page.url)
+            result = await page.evaluate("""async ({url, limit}) => {
+                const response = await fetch(url, {signal: AbortSignal.timeout(120000)});
+                if (!response.ok) throw new Error(`PDF HTTP ${response.status}`);
+                if (Number(response.headers.get('content-length')) > limit) {
+                    await response.body.cancel();
+                    return {url: response.url, data: null};
+                }
+                const reader = response.body.getReader();
+                const chunks = [];
+                let size = 0;
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    size += value.length;
+                    if (size > limit) {
+                        await reader.cancel();
+                        return {url: response.url, data: null};
+                    }
+                    chunks.push(value);
+                }
+                const parts = [];
+                for (const chunk of chunks) {
+                    for (let i = 0; i < chunk.length; i += 32768)
+                        parts.push(String.fromCharCode(...chunk.subarray(i, i + 32768)));
+                }
+                return {url: response.url, data: btoa(parts.join(''))};
+            }""", {"url": url, "limit": TELEGRAM_FILE_LIMIT})
+            public_url(result["url"])
+            body = base64.b64decode(result["data"]) if result["data"] is not None else None
+            if body is not None and not body.startswith(b"%PDF-"):
                 raise UniversityError("Ek bağlantısı PDF döndürmedi")
-            return Download(material_filename(title, url, "application/pdf"),
-                            body if len(body) <= TELEGRAM_FILE_LIMIT else None, url)
+            return Download(material_filename(title, url, "application/pdf"), body, url)
         finally:
-            await response.dispose()
+            await page.close()
 
 
 def notice_key(url: str) -> str:
@@ -266,7 +290,7 @@ class UniversityMonitor:
                 continue
             try:
                 if record["status"] == "pending":
-                    if not jev_on:
+                    if self.jev is None or not self.engine.feature_on("jev"):
                         continue
                     request = relevance_state(record["title"], self.store)
                     decision = await self.jev.ask(request, QUESTIONS)

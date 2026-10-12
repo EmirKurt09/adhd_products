@@ -12,6 +12,7 @@ import logging
 import re
 from datetime import datetime, time, timedelta, timezone
 from html import escape
+from zoneinfo import ZoneInfo
 
 from telegram import (
     BotCommand,
@@ -50,6 +51,7 @@ from .pushover import make_pushover
 from .router import FindingRouter
 from .watchdog import start_watchdog
 from .store import Store
+from .university import STATE_KEY as UNIVERSITY_STATE_KEY, UniversityMonitor
 
 log = logging.getLogger(__name__)
 
@@ -287,6 +289,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append("Gece modu: acil olmayanlar sabah gelir")
     lines.append("\n<b>Özellikler</b>")
     lines += M.features_lines(features.states(c.s, c.store))
+    university = json.loads(c.store.get(UNIVERSITY_STATE_KEY, "{}"))
+    lines.append("\n<b>Üniversite duyuruları</b> · 09:00 / 17:00 (İstanbul)")
+    if university.get("last_ok"):
+        lines.append("Son kontrol: " + M.fmt_dt(M.parse_dt(university["last_ok"]), c.s.tz, now))
+    else:
+        lines.append("İlk başarılı kontrol bekleniyor; başlangıçta mesaj gönderilmez.")
+    lines.append(f"Değerlendirme / detay bekleyen: {university.get('pending', 0)}")
+    if not c.engine.feature_on("jev"):
+        lines.append("JEV kullanılamıyor; yeni duyurular değerlendirme için bekletilir.")
+    if university.get("error"):
+        lines.append("Son hata: " + escape(university["error"]))
     if c.llm_on():
         lines.append(f"LLM: {escape(c.s.llm_provider)} · bugün kalan bütçe {max(0, c.assistant.budget_left())} token")
     await reply(update, M.Message("\n".join(lines)))
@@ -769,11 +782,42 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await flush_job(context)
 
 
+async def university_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await context.application.bot_data["university"].run()
+    await flush_job(context)
+
+
+async def university_start_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """İlk başlangıç veya kaçırılmış son 09/17 slotu için tek telafi kontrolü."""
+    state = context.application.bot_data["university"].state()
+    local = now_utc().astimezone(ZoneInfo("Europe/Istanbul"))
+    slots = [local.replace(hour=hour, minute=0, second=0, microsecond=0) for hour in (9, 17)]
+    slots.append((local - timedelta(days=1)).replace(hour=17, minute=0, second=0, microsecond=0))
+    latest = max(slot for slot in slots if slot <= local)
+    last_attempt = M.parse_dt(state.get("last_attempt"))
+    if not state.get("baseline_day") or last_attempt is None or last_attempt < latest:
+        await university_job(context)
+
+
+def schedule_university(app: Application) -> None:
+    for hour in (9, 17):
+        app.job_queue.run_daily(university_job, time(hour, tzinfo=ZoneInfo("Europe/Istanbul")),
+                                name=f"university-{hour}", job_kwargs={"max_instances": 1, "coalesce": True})
+    app.job_queue.run_once(university_start_job, 45, name="university-start")
+
+
 async def flush_job(context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
     """force: öğrenci istediği için sessiz/gece beklemesi uygulanmadan gönder."""
     c = deps(context)
 
     async def deliver(message: M.Message, ctx: dict) -> None:
+        if ctx.get("type") == "university_pdf":
+            monitor = context.application.bot_data["university"]
+            attachment = ctx["attachment"]
+            async with monitor.browser_factory(c.s) as browser:
+                download = await browser.download(attachment["url"], attachment["title"])
+            await _send_file(context, c.s.telegram_owner_chat_id, download, escape(M.clip(ctx["title"], 300)))
+            return
         sent = await send(context.bot, c.s.telegram_owner_chat_id, message)
         # JEV açıkken açıklamaları o tetikler; ayrı ödev özeti gönderilmez
         if (c.llm_on() and not c.engine.feature_on("jev") and ctx.get("type") == "new"
@@ -935,6 +979,7 @@ def build_app(settings: Settings) -> Application:
         # Ajanın riskli eylemlerinden önce JEV'e sorulur (döngüde insan yok); JEV kapalıysa kontrol atlanır
         assistant.toolbox.guard = ActionGuard(jev, engine)
     app.bot_data["ctx"] = Ctx(settings, store, engine, assistant)
+    app.bot_data["university"] = UniversityMonitor(settings, store, engine, jev)
     owner = owner_filter(settings.telegram_owner_chat_id)
 
     for names, handler in [
@@ -957,6 +1002,7 @@ def build_app(settings: Settings) -> Application:
     jq.run_repeating(flush_job, interval=15, first=20, name="flush")
     jq.run_repeating(reminder_job, interval=60, first=30, name="reminders")
     schedule_digest(app, app.bot_data["ctx"])
+    schedule_university(app)
     return app
 
 

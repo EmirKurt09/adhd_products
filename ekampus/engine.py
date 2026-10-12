@@ -434,6 +434,14 @@ class Engine:
                 if await self._deliver(send, message, {"type": "group", "kind": kind}, [r for r, _ in members], now):
                     sent += len(members)
         for row, payload in singles:
+            if row["type"] == "university_pdf":
+                # Ek hatası ana mesajı yeniden yollatmaz; mesaj gitmeden ek gönderilmez.
+                parent = self.store.outbox_by_key(payload["parent_key"])
+                if parent is None or parent["status"] == "pending":
+                    continue
+                if parent["status"] != "sent":
+                    self.store.mark_status(row["id"], "skipped")
+                    continue
             message = render_event(row["type"], payload, self.s.tz, now)
             sender = self._sender_for(row["type"], payload, send)
             if await self._deliver(sender, message, {"type": row["type"], **payload}, [row], now):
