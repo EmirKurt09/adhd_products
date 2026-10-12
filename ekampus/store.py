@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import timetable as TT
 from .detect import MISSING_TO_GONE, Diff
 from .models import Event, Item, Scan, StoredItem
 from .reminders import Due, Planned
@@ -85,12 +86,31 @@ CREATE TABLE IF NOT EXISTS documents (
     pages TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    weekday INTEGER NOT NULL,
+    start TEXT NOT NULL,
+    "end" TEXT NOT NULL,
+    room TEXT NOT NULL DEFAULT '',
+    campus TEXT NOT NULL DEFAULT '',
+    teacher TEXT NOT NULL DEFAULT '',
+    alert INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lesson_skips (
+    lesson_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    PRIMARY KEY (lesson_id, date)
+);
 """
 
 LLM_LOG_KEEP = 30
 MEMORY_MAX = 50        # kalıcı hafızadaki en fazla not (her LLM çağrısına eklendiği için sınırlı)
 MEMORY_TEXT_MAX = 300
 DOCUMENTS_KEEP = 20    # okunmuş PDF metinlerinin önbelleği (tekrar sorulunca siteye gitmemek için)
+LESSONS_MAX = 40
 
 MAX_BACKOFF = timedelta(minutes=30)
 
@@ -357,8 +377,8 @@ class Store:
 
     def outbox_stats(self) -> dict:
         row = self.db.execute(
-            # kurulmuş ama zamanı gelmemiş kişisel hatırlatmalar "bekleyen bildirim" sayılmaz
-            "SELECT SUM(status = 'pending' AND type != 'note') AS pending, MAX(sent_at) AS last_sent, "
+            # kurulmuş ama zamanı gelmemiş hatırlatmalar ve derse çıkış bildirimleri "bekleyen bildirim" sayılmaz
+            "SELECT SUM(status = 'pending' AND type NOT IN ('note', 'depart')) AS pending, MAX(sent_at) AS last_sent, "
             "SUM(status = 'pending' AND attempts > 0) AS failing FROM outbox"
         ).fetchone()
         return {"pending": row["pending"] or 0, "failing": row["failing"] or 0, "last_sent": row["last_sent"]}
@@ -415,6 +435,81 @@ class Store:
     def memory_clear(self) -> int:
         with self.db:
             return self.db.execute("DELETE FROM memory").rowcount
+
+    # ── Ders programı (/program) ──────────────────────────────────────────
+    def lessons(self) -> list[dict]:
+        return [dict(r) for r in self.db.execute("SELECT * FROM lessons ORDER BY weekday, start, id")]
+
+    def lesson_get(self, lesson_id: int) -> dict | None:
+        row = self.db.execute("SELECT * FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+        return dict(row) if row else None
+
+    def lesson_add(self, fields: dict, now: datetime) -> tuple[int, bool]:
+        """(id, yeni mi). Aynı gün, saat ve kodla ders zaten varsa onun id'si döner. Hatalı alan: ValueError."""
+        f = TT.clean(fields)
+        TT.check_times(f["start"], f["end"])
+        same = self.db.execute("SELECT id FROM lessons WHERE weekday = ? AND start = ? AND code = ? COLLATE NOCASE",
+                               (f["weekday"], f["start"], f["code"])).fetchone()
+        if same:
+            return same["id"], False
+        if self.db.execute("SELECT COUNT(*) AS n FROM lessons").fetchone()["n"] >= LESSONS_MAX:
+            raise ValueError(f"programda en fazla {LESSONS_MAX} ders olabilir")
+        with self.db:
+            cur = self.db.execute(
+                'INSERT INTO lessons (code, name, weekday, start, "end", room, campus, teacher, alert, created_at) '
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f["code"], f["name"], f["weekday"], f["start"], f["end"], f.get("room", ""), f.get("campus", ""),
+                 f.get("teacher", ""), fields.get("alert"), _ts(now)))
+        return cur.lastrowid, True
+
+    def lesson_update(self, lesson_id: int, fields: dict) -> dict | None:
+        """Verilen alanları değiştirir; güncel dersi döner (yoksa None). Bekleyen çıkış bildirimi yeniden kurulur."""
+        lesson = self.lesson_get(lesson_id)
+        if lesson is None:
+            return None
+        f = TT.clean(fields, partial=True)
+        if "alert" in fields:
+            f["alert"] = None if fields["alert"] is None else int(bool(fields["alert"]))
+        merged = {**lesson, **f}
+        TT.check_times(merged["start"], merged["end"])
+        if f:
+            sets = ", ".join(f'"{k}" = ?' for k in f)
+            with self.db:
+                self.db.execute(f"UPDATE lessons SET {sets} WHERE id = ?", (*f.values(), lesson_id))
+                self._drop_departures(lesson_id)
+        return self.lesson_get(lesson_id)
+
+    def lesson_delete(self, lesson_id: int) -> dict | None:
+        lesson = self.lesson_get(lesson_id)
+        if lesson is not None:
+            with self.db:
+                self.db.execute("DELETE FROM lessons WHERE id = ?", (lesson_id,))
+                self.db.execute("DELETE FROM lesson_skips WHERE lesson_id = ?", (lesson_id,))
+                self._drop_departures(lesson_id)
+        return lesson
+
+    def lesson_skip(self, lesson_id: int, day: str, skip: bool = True) -> None:
+        """O tarihteki dersi iptal et (bildirim gitmez) ya da iptali geri al."""
+        with self.db:
+            if skip:
+                self.db.execute("INSERT OR IGNORE INTO lesson_skips (lesson_id, date) VALUES (?, ?)", (lesson_id, day))
+            else:
+                self.db.execute("DELETE FROM lesson_skips WHERE lesson_id = ? AND date = ?", (lesson_id, day))
+            self._drop_departures(lesson_id, day)
+
+    def lesson_skips(self, since: str) -> set[tuple[int, str]]:
+        rows = self.db.execute("SELECT lesson_id, date FROM lesson_skips WHERE date >= ?", (since,))
+        return {(r["lesson_id"], r["date"]) for r in rows}
+
+    def _drop_departures(self, lesson_id: int, day: str | None = None) -> None:
+        """Henüz gönderilmemiş çıkış bildirimlerini siler; sonraki planlama turu güncel haliyle yeniden kurar."""
+        pattern = f"depart:{lesson_id}:{day}" if day else f"depart:{lesson_id}:%"
+        self.db.execute("DELETE FROM outbox WHERE type = 'depart' AND status = 'pending' AND key LIKE ?", (pattern,))
+
+    def departures_pending(self) -> list[dict]:
+        rows = self.db.execute("SELECT id, payload, next_attempt_at FROM outbox WHERE type = 'depart' "
+                               "AND status = 'pending' ORDER BY next_attempt_at, id")
+        return [{"id": r["id"], "at": r["next_attempt_at"], **json.loads(r["payload"])} for r in rows]
 
     # ── Ajan için salt okunur sorgu ───────────────────────────────────────
     def read_only_query(self, sql: str, limit: int = 50, functions: dict | None = None,
