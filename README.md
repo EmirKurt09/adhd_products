@@ -9,6 +9,7 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
 ## Özellikler
 
 - **Takip:** Ödevler ve teslim durumu, notlar, duyurular, ders materyalleri, canlı dersler ve sınavlar.
+- **Üniversite duyuruları:** Üniversitenin public duyuru arşivi Playwright ile İstanbul saatiyle 09:00 ve 17:00'de kontrol edilir. JEV yalnızca başlık ve bölüm/ders bilgileriyle uygunluğu değerlendirir; geçen duyurunun metni ve PDF ekleri Telegram'a gelir.
 - **Bildirim:** Yeni ya da değişen her şey Telegram'a anında gelir. Ödev ayrıntısı ve dosyalar mesajdaki butonlarla açılır.
 - **Hatırlatma:**
   - Teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce.
@@ -27,9 +28,10 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
 
   Yaptığı her değişiklik cevabın altında "Yapılanlar" olarak listelenir.
 - **Kalıcı hafıza:** Agent, öğrencinin söylediği kalıcı tercihleri ve bilgileri (bırakılan ders, çalışma saatleri…) kendisi kaydeder ve sonraki her cevapta dikkate alır. Notlar `/hafiza`'dan görülür ve silinir.
-- **JEV (TypeSafe):** İki yerde kullanılır; JEV sadece olasılık döner, kararı backend threshold'larla verir.
+- **JEV (TypeSafe):** Üç yerde kullanılır; JEV sadece olasılık döner, kararı backend threshold'larla verir.
   - **Finding triage:** Her yeni finding için teslim, sınav, tarih değişikliği, açıklama ihtiyacı ve "hemen uyarılsın mı" olasılıklarını verir. Emin olunan finding'ler doğrudan alert olur, kararsızlar LLM'e gider.
   - **Action guardrail:** Agent riskli bir action tool çağırdığında, tool çalışmadan önce JEV'e "öğrenci bunu açıkça istedi mi, riskli mi" diye sorulur. İstenmemiş riskli action yapılmaz, agent öğrenciye sorar. Human-in-the-loop yoktur; bir öneriyi "evet" diye onaylamak da istek sayılır.
+  - **Üniversite duyurusu gate:** Yalnızca duyuru başlığı, bölüm ve kayıtlı ders kodları/adları gönderilir. Uygunluk olasılığı 0,60 ve üzerindeyse duyuru Telegram outbox'a alınır. Duyuru metni, ek adları ve PDF içeriği JEV'e gönderilmez.
 - **Uyarı yöneticisi:** Bildirim türleri açılıp kapatılabilir; gece modu ve iki seviyeli sessiz mod vardır. Siteye erişilemediğinde açıklamalı uyarı gelir.
 - **Sistem izleme:** Çökme, takılma, hata artışı, siteye erişilememesi ve giriş sorunları Pushover'a bildirilir. Takılan bot kendini yeniden başlatır.
 - **İsteğe bağlı özellikler:** LLM, JEV ve Pushover anahtarı varsa çalışır ve `/ayarlar`'dan açılıp kapatılır. Anahtarı olmayan özelliği bot açılışta, `/durum`'da ve `/ayarlar`'da "çalışmıyor: .env'de X yok" diye bildirir. Bot bunların hiçbiri olmadan da takip, bildirim ve hatırlatma yapar.
@@ -42,6 +44,7 @@ Backend tek bir Python process'idir ve Docker container'ında (`ekampus`) çalı
 | Bileşen | Nerede | Görevi |
 |---|---|---|
 | Scanner (`scan.py`, `browser.py`) | Backend, Playwright/Chromium | e-Kampüs'e girer, sayfaları ve JSON endpoint'lerini okur (salt okunur) |
+| UniversityMonitor (`university.py`) | Backend, Playwright/Chromium + JobQueue | Public duyuru listesini okur; başlık için JEV threshold kararından sonra detayları ve PDF bağlantılarını outbox'a alır |
 | Diff (`detect.py`) | Backend | Okunanı önceki durumla karşılaştırır, event üretir |
 | Store (`store.py`) | Backend, SQLite | Kayıtlar, outbox, ders programı, sohbet geçmişi, hafıza, okunmuş PDF'ler, LLM log'ları |
 | Reminder planner (`reminders.py`, `timetable.py`) | Backend, JobQueue 60 sn | Teslim, canlı ders ve derse çıkış bildirimlerini zamanı gelince gönderilmek üzere outbox'a koyar |
@@ -56,6 +59,26 @@ Backend tek bir Python process'idir ve Docker container'ında (`ekampus`) çalı
 | LLM | External service: xAI Grok ya da DeepSeek API | Metin ve tool call üretir |
 | Telegram | External service: Telegram Bot API | Öğrenciyle tek kanal |
 | Pushover | External service: Pushover API | Alert'lerin telefona gitmesi |
+
+### Üniversite duyuruları — academic_retake, bölüm 2
+
+Kaynak: <https://ticaret.edu.tr/category/duyurular/>. Liste ve detay sayfaları oturumsuz Playwright context içinde açılır; e-Kampüs login veya session dosyası kullanılmaz. PDF dosyaları da Playwright üzerinden indirilir.
+
+```mermaid
+flowchart LR
+    SITE["Üniversite duyuru arşivi"] -->|"Playwright: liste başlıkları"| MON["Backend: UniversityMonitor"]
+    MON -->|"Yalnızca başlık + bölüm/ders bilgileri"| JEV["TypeSafe API: JEV"]
+    JEV -->|"Uygunluk olasılığı"| GATE["Backend: threshold >= 0.60"]
+    GATE -->|"Geçerse Playwright ile detay oku"| OUT["SQLite outbox: mesaj ve PDF ekleri"]
+    OUT -->|"Mevcut bildirim tercihleri"| TG["Telegram Bot API"]
+```
+
+- **Kapsam:** Bilgisayar Mühendisliği lisans bölümü, DB'deki ders programı ve öğrenciyi kapsayan ortak akademik işlemler. Ders programı boşsa e-Kampüs ders listesi kullanılır. Başka bölümler, personel alımları, lisansüstü işlemler, burs ve genel tanıtım etkinlikleri kapsam dışıdır.
+- **Başlangıç:** İlk başarılı kontrol sessiz baseline oluşturur. Önceden yayımlanmış arşiv duyuruları gönderilmez. Sonraki kontroller sayfalama ile son başarılı kontrolün gününe kadar ilerler; URL başına bir kez değerlendirme/gönderim yapılır. Mevcut duyurunun sonradan düzenlenmesi yeni bildirim üretmez.
+- **Zamanlama:** 09:00 ve 17:00, `Europe/Istanbul`. İlk açılışta baseline alınır; yeniden başlatmada son zamanlanmış kontrol kaçırılmışsa bir telafi kontrolü yapılır.
+- **Gate:** JEV'e yalnızca başlık ve bölüm/ders bilgileri gider. Belirsiz başlık içerik veya PDF ile tamamlanmaz; Grok fallback yoktur. JEV kapalıysa, anahtarı eksikse veya hata verirse duyuru sonraki kontrol için saklanır. Başlığa dayanan bu filtre, uygunluğu kesin olarak garanti etmez.
+- **Gönderim:** JEV'den geçen duyurunun detay metni kaynak alıntısı olarak gönderilir; PDF ekleri metni çıkarılmadan dosya olarak iletilir. PDF'den ibaret duyurularda da karar başlığa göre verilir. Duyurular ayarı, gece ve sessiz mod geçerlidir. Ek hatası ana mesajı yeniden göndertmez; 50 MB üzerindeki PDF bağlantıyla paylaşılır.
+- **Durum:** Kaynak takibi mevcut SQLite `kv` içinde, mesaj ve ekler mevcut outbox içinde tutulur. `/durum` kontrol zamanını, bekleyen değerlendirmeleri ve hatayı; `/llmlog` JEV kararlarını gösterir. Yeni servis veya DB migration'ı yoktur.
 
 ### Finding pipeline
 
