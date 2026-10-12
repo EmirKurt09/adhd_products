@@ -14,6 +14,10 @@ Bu proje siteyi düzenli aralıklarla kontrol eder ve önemli olan her şeyi Tel
   - Teslim edilmemiş ödevler için 24 ve 3 saat kala, canlı dersten 15 dakika önce.
   - Her sabah günün özeti.
   - Öğrencinin kendi kurduğu saatli hatırlatmalar.
+- **Ders programı:** Yüz yüze derslerin günü, saati, sınıfı ve kampüsü SQLite'ta durur.
+  - "Şu anki ders hangi sınıftaydı?" sorusuna süren dersle, ders yoksa sıradaki dersle ve sınıfıyla cevap verilir. `/program` haftalık programı gösterir.
+  - **Derse çıkış bildirimi:** Dersten 1 saat 15 dakika önce Pushover'dan "derse çıkma vakti" gelir. 12:00'den önce başlayan derslerde ve o gün zaten aynı kampüsteyken gelmez.
+  - Program sohbetten değiştirilir: ders eklenir, sınıf ya da saat değişir. "Bu dersi iptal ettim" denince sadece o haftaki dersin bildirimi kapanır.
 - **LLM agent:** Sohbete yazılan mesajı Grok ya da DeepSeek tool calling ile cevaplar ve botu yönetir:
   - **Site:** Siteyi hemen kontrol edip yeni gelenleri tek tek söyler. Ödev sayfasını canlı açar, ekleri ve materyalleri (bir seferde 10'a kadar) gönderir. Kilitlenen girişi tekrar dener.
   - **Belgeler:** PDF materyalleri ve ödev eklerini okur, içinden soru cevaplar, kaynak sayfayı söyler. PDF gönderdiğinde okumayı teklif eder; gönderilen PDF'nin altında "Oku ve özetle" butonu çıkar.
@@ -39,7 +43,8 @@ Backend tek bir Python process'idir ve Docker container'ında (`ekampus`) çalı
 |---|---|---|
 | Scanner (`scan.py`, `browser.py`) | Backend, Playwright/Chromium | e-Kampüs'e girer, sayfaları ve JSON endpoint'lerini okur (salt okunur) |
 | Diff (`detect.py`) | Backend | Okunanı önceki durumla karşılaştırır, event üretir |
-| Store (`store.py`) | Backend, SQLite | Kayıtlar, outbox, sohbet geçmişi, hafıza, okunmuş PDF'ler, LLM log'ları |
+| Store (`store.py`) | Backend, SQLite | Kayıtlar, outbox, ders programı, sohbet geçmişi, hafıza, okunmuş PDF'ler, LLM log'ları |
+| Reminder planner (`reminders.py`, `timetable.py`) | Backend, JobQueue 60 sn | Teslim, canlı ders ve derse çıkış bildirimlerini zamanı gelince gönderilmek üzere outbox'a koyar |
 | Outbox flush (`engine.py`) | Backend, JobQueue | Bekleyen bildirimleri gönderir; sessiz mod, gece modu, kategori ve ders filtreleri burada uygulanır |
 | FindingRouter (`router.py`) | Backend | Finding'leri JEV'e sorar, threshold'larla alert / LLM / explain kararını verir |
 | Assistant (`llm.py`) | Backend | LLM'i tool-calling loop ile çalıştırır (sohbet, triage, explain, digest planı) |
@@ -138,11 +143,41 @@ flowchart TB
 ```
 
 Sohbete yazılan mesaj JEV'e gitmez; bot handler doğrudan Assistant'a verir. Assistant LLM'i tool-calling loop ile çalıştırır, LLM'in istediği tool'ları Toolbox yürütür:
-- **Read tools:** Kayıtlar, ajanda, reminder takvimi, botun durumu, read-only SQL.
+- **Read tools:** Kayıtlar, ajanda, reminder takvimi, ders programı ve sınıflar, botun durumu, read-only SQL.
 - **Site tools:** Ödev sayfası, PDF okuma.
-- **Action tools:** Sessiz mod, ayarlar, reminder'lar, hafıza, dosya ve bildirim gönderme.
+- **Action tools:** Sessiz mod, ayarlar, reminder'lar, ders programı (ekle, değiştir, bu haftaki dersi iptal et), hafıza, dosya ve bildirim gönderme. Ders programını değiştiren her tool riskli sayılır ve ActionGuard'dan geçer.
 
 Risksiz action'lar hemen yapılır; riskli olanlar önce ActionGuard'dan geçer. Yapılan her action cevabın altında "Yapılanlar" olarak listelenir. Dosya gönderme gibi side effect'leri bot handler cevaptan sonra yapar.
+
+### Reminder pipeline
+
+```mermaid
+flowchart LR
+    subgraph backend["Backend: ekampus"]
+        RJ["reminder_job<br/>bot.py, JobQueue 60 sn"]
+        RP["Reminder planner<br/>reminders.py: teslim, canlı ders<br/>timetable.py: derse çıkış"]
+        DB[("SQLite<br/>items, lessons, lesson_skips<br/>outbox")]
+        OB["Outbox flush<br/>engine.py"]
+    end
+
+    subgraph external["External services"]
+        PO["Pushover API"]
+        TG["Telegram Bot API"]
+    end
+
+    RJ --> RP
+    DB -->|"ödevler, dersler, iptaller"| RP
+    RP -->|"outbox event, not_before = gönderim zamanı"| DB
+    DB -->|zamanı gelen kayıtlar| OB
+    OB -->|"depart: dersten 1 sa 15 dk önce"| PO
+    OB -->|teslim ve canlı ders hatırlatmaları| TG
+    PO -.->|"Pushover kapalı ya da hata"| TG
+
+    classDef optional stroke-dasharray: 5 5
+    class PO optional
+```
+
+Reminder planner her dakika çalışır ve bildirimi önceden, gönderim zamanıyla (`not_before`) outbox'a yazar; outbox key'i aynı bildirimin iki kez kurulmasını önler. Ders değişir ya da iptal edilirse o derse ait henüz gönderilmemiş `depart` kaydı silinir ve sonraki turda güncel haliyle yeniden kurulur. Ders programının verisi repoya girmez; `python -m ekampus timetable import data/program.json` ile bir kez yüklenir, sonrası sohbetten değişir.
 
 ### JEV'in iki kullanımı
 
@@ -193,7 +228,8 @@ ekampus/
   parse.py       sayfa ayrıştırıcıları
   detect.py      önceki durumla karşılaştırma, olay üretimi
   reminders.py   teslim hatırlatma ve canlı ders kuralları
-  store.py       SQLite: kayıtlar, outbox, sohbet geçmişi, hafıza, PDF cache, LLM log'ları
+  timetable.py   ders programı: şu anki / sıradaki ders, derse çıkış planı
+  store.py       SQLite: kayıtlar, outbox, ders programı, sohbet geçmişi, hafıza, PDF cache, LLM log'ları
   engine.py      tarama zamanlaması, sağlık uyarıları, sessiz mod, bildirim gönderimi
   jev.py         JEV client ve finding'in JEV'e giden state'i
   router.py      FindingRouter: JEV olasılıklarına göre alert / LLM / explain
@@ -296,6 +332,7 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 | `/ayarlar` | LLM, JEV ve Pushover'ı aç/kapa; hafıza ve hatırlatmalara geçiş |
 | `/hafiza` | LLM'in senin hakkında hatırladıkları; tek tek ya da hepsini silme |
 | `/hatirlatmalar` | Kurduğun saatli hatırlatmalar ve iptal |
+| `/program` | Şu anki ve sıradaki ders, haftalık program, sınıflar ve bu haftaki iptaller |
 | `/sessiz 2s` | Acil olmayan bildirimleri belirli bir süre beklet (`30dk`, `1g`, `kapat`) |
 | `/yenile`, `/durum` | Siteyi hemen kontrol et; son ve sonraki kontrol, giriş, outbox ve özelliklerin durumu |
 | `/llmlog`, `/unut` | LLM'in son cevapta baktığı veriler ve yaptığı eylemler; sohbet geçmişini silme (hafıza kalır) |
@@ -311,6 +348,7 @@ Bütün ayarlar `.env` dosyasında durur; tam liste `.env.example` içinde.
 - "Lab Raporu 2'yi teslim ettim", "Fizik dersinden bildirim gelmesin", "duyuruları kapat"
 - "sabah özeti 9'da gelsin", "dünkü duyuruyu tekrar at"
 - "Ağlar'ı bıraktım, aklında olsun"
+- "şu anki ders hangi sınıftaydı?", "bulanık mantık nerede?", "kariyer planlamanın sınıfı D-204", "bu haftaki finans dersini iptal ettim"
 
 LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştırır.
 
@@ -338,6 +376,7 @@ LLM kapalıysa "ödev", "bugün", "not" gibi kelimeler ilgili komutu çalıştı
 .venv/Scripts/python -m ekampus check --dry-run     # tek tarama, durumu değiştirmeden
 .venv/Scripts/python -m ekampus test-notify --olay odev   # örnek bildirimi botun gönderim yolundan geçir
 .venv/Scripts/python -m ekampus jev-test            # örnek finding'lerde JEV kararları
+.venv/Scripts/python -m ekampus timetable import data/program.json   # ders programını yükle (export: JSON'a yazdır)
 ```
 
 Sitenin yapısı, kullanılan adresler ve dikkat edilmesi gereken noktalar [docs/site-map.md](docs/site-map.md) dosyasında.
