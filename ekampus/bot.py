@@ -59,6 +59,7 @@ KEYBOARD = ReplyKeyboardMarkup(
 )
 COMMANDS = [
     ("bugun", "Bugün ve yarın"), ("hafta", "Önümüzdeki 7 gün"), ("odevler", "Açık ödevler"),
+    ("program", "Ders programı, sınıflar, şu anki ders"),
     ("notlar", "Notlar"), ("duyurular", "Son duyurular"), ("dosyalar", "Ders materyalleri: ders seç, dosyayı al"),
     ("dersler", "Dersler ve ilerleme"), ("takvim", "30 günlük takvim"), ("yenile", "Siteyi şimdi kontrol et"),
     ("bildirimler", "Uyarı yöneticisi: aç/kapa, sessiz, geçmiş"),
@@ -307,6 +308,13 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     c = deps(context)
     await reply(update, M.notes_view(c.store.notes_pending(), c.s.tz, now_utc()))
+
+
+async def cmd_timetable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    c = deps(context)
+    now = now_utc()
+    since = (now.astimezone(c.s.tz) - timedelta(days=1)).date().isoformat()
+    await reply(update, M.timetable_view(c.store.lessons(), c.store.lesson_skips(since), c.s.tz, now))
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -935,7 +943,7 @@ def build_app(settings: Settings) -> Application:
         (("duyurular",), cmd_announcements), (("dosyalar",), cmd_files), (("dersler",), cmd_courses),
         (("durum",), cmd_status), (("yenile",), cmd_refresh), (("sessiz",), cmd_mute),
         (("bildirimler", "uyarilar", "alarm"), cmd_manager), (("ayarlar", "ozellikler"), cmd_settings),
-        (("hatirlatmalar",), cmd_notes), (("hafiza",), cmd_memory),
+        (("hatirlatmalar",), cmd_notes), (("hafiza",), cmd_memory), (("program",), cmd_timetable),
         (("girisdene",), cmd_retry_login), (("unut",), cmd_forget), (("llmlog",), cmd_llmlog),
     ]:
         app.add_handler(CommandHandler(list(names), handler, filters=owner))

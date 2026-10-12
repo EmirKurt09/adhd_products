@@ -215,6 +215,36 @@ def test_departure_held_in_full_quiet_but_not_normal_quiet(settings):
     assert flush(engine, at(0, "15:45")) == []
 
 
+def test_program_view_shows_now_next_and_week():
+    from ekampus import messages as M
+
+    store = store_with_schedule()
+    gnl = by_code(store, "GNL390")["id"]
+    store.lesson_skip(gnl, "2026-10-13")
+    text = M.timetable_view(store.lessons(), store.lesson_skips("2026-10-12"), TZ, at(0, "14:10")).text
+    assert "Şu an: BIL463 Bulanık Mantık · B-111 (15:50 biter)" in text
+    assert "Sıradaki: 14 Eki Çarşamba 09:00" in text or "Sıradaki: yarın 09:00" in text  # iptal edilen GNL390 atlanır
+    assert "17:00-18:50 GNL390 Yapay Zekâ ve Büyük Veri ile Finans · C-307 (Küçükyalı) · <i>bu hafta iptal</i>" in text
+    assert text.index("<b>Salı</b>") < text.index("<b>Cuma</b>")
+
+
+def test_cli_import_and_export(settings, monkeypatch, tmp_path, capsys):
+    import json
+
+    from ekampus import __main__ as cli
+
+    path = tmp_path / "program.json"
+    path.write_text(json.dumps(SCHEDULE + [{"code": "BOZUK", "name": "x", "weekday": "x", "start": "1", "end": "2"}],
+                               ensure_ascii=False), encoding="utf-8")
+    assert cli._timetable(settings, "import", str(path)) == 0
+    assert cli._timetable(settings, "import", str(path)) == 0  # ikinci kez eklemez
+    out = capsys.readouterr().out
+    assert "6 ders eklendi" in out and "0 ders eklendi, programda 6 ders var" in out and "Atlandı (BOZUK)" in out
+    cli._timetable(settings, "export", None)
+    exported = json.loads(capsys.readouterr().out)
+    assert exported[0]["code"] == "BIL463" and exported[1]["campus"] == "Küçükyalı"
+
+
 def test_delete_removes_skips():
     store = store_with_schedule()
     lesson = by_code(store, "BIL441")

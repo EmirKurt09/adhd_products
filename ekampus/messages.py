@@ -325,6 +325,7 @@ def help_text(llm_off_reason: str | None = None) -> str:
         "/bildirimler — uyarı yöneticisi (aç/kapa, sessiz, geçmiş)",
         "/ayarlar — LLM, JEV ve Pushover'ı aç/kapa",
         "/hatirlatmalar — kurduğun hatırlatmalar",
+        "/program — ders programı, sınıflar, şu anki ders",
         "/durum — sistem durumu",
         "/sessiz 2s — 2 saat acil olmayanları beklet (/sessiz kapat)",
         "",
@@ -487,6 +488,37 @@ def memory_view(rows: list[dict], confirm_clear: bool = False) -> Message:
     bottom = [_btn("Hepsini sil", "mem:clear")] if rows else []
     buttons.append(bottom + [_btn("Ayarlar", "set:show")])
     return Message("\n".join(lines), buttons)
+
+
+def timetable_view(lessons: list[dict], skipped: set, tz: ZoneInfo, now: datetime) -> Message:
+    """/program: şu anki ve sıradaki ders, ardından gün gün haftalık program."""
+    from . import timetable as TT
+
+    lines = ["<b>Ders programı</b>"]
+    if not lessons:
+        lines.append("\nProgramda ders yok. Bana yazman yeter: <i>“Salı 13:00-15:50 BIL463 Bulanık Mantık, B-111”</i>")
+        return Message("\n".join(lines))
+    current, following = TT.now_or_next(lessons, now, tz, skipped)
+    if current:
+        lines.append(f"Şu an: {escape(TT.label(current.lesson))} · {escape(TT.place(current.lesson))} "
+                     f"({current.lesson['end']} biter)")
+    if following:
+        lines.append(f"Sıradaki: {fmt_dt(following.start, tz, now)} {escape(TT.label(following.lesson))} · "
+                     f"{escape(TT.place(following.lesson))}")
+    upcoming = {o.lesson["id"]: o for o in reversed(TT.occurrences(lessons, now, 7, tz))}  # her dersin en yakını
+    for day, name in enumerate(TT.WEEKDAYS):
+        rows = [l for l in lessons if l["weekday"] == day]
+        if not rows:
+            continue
+        lines.append(f"\n<b>{name}</b>")
+        for lesson in rows:
+            occ = upcoming.get(lesson["id"])
+            off = " · <i>bu hafta iptal</i>" if occ and (lesson["id"], occ.date.isoformat()) in skipped else ""
+            lines.append(f"{lesson['start']}-{lesson['end']} {escape(TT.label(lesson))} · "
+                         f"{escape(TT.place(lesson))}{off}")
+    lines.append("\nDerse çıkış bildirimi öğleden sonraki derslerden 1 sa 15 dk önce Pushover'dan gelir. Değiştirmek "
+                 "için bana yaz: <i>“bu haftaki bulanık mantığı iptal ettim”</i>")
+    return Message("\n".join(lines))
 
 
 def notes_view(notes: list[dict], tz: ZoneInfo, now: datetime) -> Message:

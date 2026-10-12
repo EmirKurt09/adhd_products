@@ -249,6 +249,37 @@ async def _jev_test(settings: Settings) -> int:
     return 0
 
 
+def _timetable(settings: Settings, action: str, path: str | None) -> int:
+    """Ders programını JSON dosyasından içe al ya da JSON olarak yazdır. Veri repoya girmez; dosya data/ altında durur."""
+    import json
+    from datetime import datetime, timezone
+
+    from .store import Store
+
+    store = Store(settings.db_path)
+    try:
+        if action == "export":
+            keep = ("code", "name", "weekday", "start", "end", "room", "campus", "teacher", "alert")
+            print(json.dumps([{k: l[k] for k in keep} for l in store.lessons()], ensure_ascii=False, indent=2))
+            return 0
+        if not path:
+            print("JSON dosyasının yolunu ver: timetable import data/program.json")
+            return 1
+        with open(path, encoding="utf-8") as f:
+            lessons = json.load(f)
+        now = datetime.now(timezone.utc)
+        added = 0
+        for fields in lessons:
+            try:
+                added += store.lesson_add(fields, now)[1]
+            except ValueError as e:
+                print(f"Atlandı ({fields.get('code', '?')}): {e}")
+        print(f"{added} ders eklendi, programda {len(store.lessons())} ders var.")
+        return 0
+    finally:
+        store.close()
+
+
 def _health(settings: Settings) -> int:
     """Konteyner sağlık kontrolü: bot döngüsü heartbeat dosyasını düzenli güncellemeli."""
     try:
@@ -285,6 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("bot", help="Telegram botunu ve izlemeyi başlat (sürekli çalışır)")
     sub.add_parser("jev-test", help="örnek bulgularla JEV kararlarını göster (hiçbir şey göndermez)")
     sub.add_parser("health", help="konteyner sağlık kontrolü")
+    timetable = sub.add_parser("timetable", help="ders programını JSON'dan içe al ya da JSON olarak yazdır")
+    timetable.add_argument("action", choices=["import", "export"])
+    timetable.add_argument("path", nargs="?", help="import için JSON dosyası")
     args = parser.parse_args(argv)
 
     try:
@@ -309,6 +343,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_login(settings, args.headed, args.force))
         if args.cmd == "explore":
             return asyncio.run(_explore(settings, args.max_pages))
+        if args.cmd == "timetable":
+            return _timetable(settings, args.action, args.path)
         if args.cmd == "jev-test":
             return asyncio.run(_jev_test(settings))
         if args.cmd == "check":
