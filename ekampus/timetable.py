@@ -120,9 +120,10 @@ def occurrences(lessons: list[dict], since: datetime, days: int, tz) -> list[Occ
     return sorted(found, key=lambda o: (o.start, o.lesson.get("id", 0)))
 
 
-def now_or_next(lessons: list[dict], now: datetime, tz) -> tuple[Occurrence | None, Occurrence | None]:
-    """(şu an süren ders, sıradaki ders). Program boşsa ikisi de None."""
-    upcoming = occurrences(lessons, now, 8, tz)
+def now_or_next(lessons: list[dict], now: datetime, tz,
+                skipped: set[tuple[int, str]] = frozenset()) -> tuple[Occurrence | None, Occurrence | None]:
+    """(şu an süren ders, sıradaki ders); iptal edilen (skipped) örnekler atlanır. Program boşsa ikisi de None."""
+    upcoming = [o for o in occurrences(lessons, now, 8, tz) if (o.lesson.get("id"), o.date.isoformat()) not in skipped]
     current = next((o for o in upcoming if o.start <= now < o.end), None)
     following = next((o for o in upcoming if o.start > now), None)
     return current, following
@@ -164,16 +165,17 @@ def wants_alert(occ: Occurrence, same_day: list[Occurrence]) -> bool:
 
 
 def departures(lessons: list[dict], skipped: set[tuple[int, str]], now: datetime, tz,
-               lead: timedelta = LEAD) -> list[Departure]:
+               lead: timedelta = LEAD, ahead: timedelta = PLAN_AHEAD) -> list[Departure]:
     """Önümüzdeki saatlerde başlayacak dersler için "yola çık" bildirimleri.
     skipped: {(ders id, 'YYYY-MM-DD')}, öğrencinin iptal ettiği (o haftaki) dersler. Başlamış derse bildirim kurulmaz."""
     def live(o: Occurrence) -> bool:
         return (o.lesson["id"], o.date.isoformat()) not in skipped
 
-    window = occurrences(lessons, now - timedelta(days=1), 3, tz)  # aynı günün önceki dersleri de görünsün
+    # aynı günün önceki dersleri de görünsün diye bir gün geriden başlanır
+    window = occurrences(lessons, now - timedelta(days=1), ahead.days + 3, tz)
     plan = []
     for occ in window:
-        if occ.start <= now or occ.start > now + PLAN_AHEAD or not live(occ):
+        if occ.start <= now or occ.start > now + ahead or not live(occ):
             continue
         same_day = [o for o in window if o.date == occ.date and o is not occ and live(o)]
         if wants_alert(occ, same_day):

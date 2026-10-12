@@ -24,6 +24,7 @@ from typing import Any, Callable, Protocol
 from . import documents, features
 from . import messages as M
 from . import prefs as PR
+from . import timetable as TT
 from .browser import AuthGuard
 from .config import Settings
 from .messages import fmt_dt, remaining
@@ -35,6 +36,7 @@ NOTES_MAX = 30
 FILES_PER_TURN = 10
 REFRESH_COOLDOWN = timedelta(seconds=60)
 TIME_FORMAT = "YYYY-MM-DD HH:MM (İstanbul saati)"
+LEAD_TEXT = "1 sa 15 dk"  # TT.LEAD
 
 
 def parse_local(text: str, tz, now: datetime) -> datetime:
@@ -226,17 +228,27 @@ class Toolbox:
             Tool("pending_notifications", "Henüz gönderilmemiş, bekleyen bildirimler ve neden beklediği (sessiz mod, "
                                           "gece modu, gönderim hatası).", params(), self._pending_notifications),
             Tool("upcoming_reminders", "Önümüzdeki N gün içinde gelecek BÜTÜN hatırlatmalar, zaman sırasıyla: otomatik "
-                                       "teslim hatırlatmaları (24 ve 3 saat kala), canlı ders uyarıları ve öğrencinin "
-                                       "kurduğu hatırlatmalar. \"Aktif hatırlatmalarım ne?\" sorusu için.",
+                                       "teslim hatırlatmaları (24 ve 3 saat kala), canlı ders uyarıları, derse çıkış "
+                                       "bildirimleri ve öğrencinin kurduğu hatırlatmalar. \"Aktif hatırlatmalarım ne?\" sorusu için.",
                  params({"days": {"type": "integer", "minimum": 1, "maximum": 60}}), self._upcoming_reminders),
+            Tool("timetable", "Haftalık ders programı (yüz yüze dersler): id, gün, saat, ders, sınıf, kampüs, öğretim "
+                              "üyesi, derse çıkış bildiriminin durumu ve bu haftaki iptaller. day verilirse sadece o gün "
+                              "(Pazartesi..Pazar).",
+                 params({"day": {"type": "string"}}), self._timetable),
+            Tool("class_now", "Şu an süren ders ve sıradaki ders, sınıflarıyla (\"şu anki ders hangi sınıftaydı\", "
+                              "\"sıradaki dersim ne\"). Sınıfı asla tahmin etme; bunu kullan.", params(), self._class_now),
+            Tool("find_class", "Bir dersin sınıfı, günü, saati ve bir sonraki zamanı (\"bulanık mantık hangi sınıfta\"). "
+                               "query ders kodu ya da adının bir parçası.",
+                 params({"query": {"type": "string"}}, ["query"]), self._find_class),
             Tool("query_db", "Botun veritabanında salt okunur SQL (sadece SELECT/WITH, en fazla 50 satır). Diğer araçlar "
                              "yetmediğinde kullan. Tablolar: items(kind: assignment|announcement|grade|file|live|event, "
                              "uid, title, course, due_at, body, status: active|gone, done_manual, meta JSON {submitted, "
                              "grade, viewed}, extra JSON, first_seen, updated_at); outbox(id, type: new|changed|"
-                             "due_changed|reminder|live_soon|note|alert|explain, payload JSON, status: pending|sent|muted|"
+                             "due_changed|reminder|live_soon|note|depart|alert|explain, payload JSON, status: pending|sent|muted|"
                              "skipped, created_at, next_attempt_at, sent_at); memory(id, text, created_at); chat(role, "
                              "content, created_at); llm_log(created_at, data JSON); kv(key, value); documents(key, title, "
-                             "created_at). Zamanlar UTC ISO metin; yerel(sütun) fonksiyonu İstanbul saatine çevirir. "
+                             "created_at); lessons(id, code, name, weekday 0=Pazartesi, start, \"end\", room, campus, "
+                             "teacher, alert); lesson_skips(lesson_id, date). Zamanlar UTC ISO metin; yerel(sütun) fonksiyonu İstanbul saatine çevirir. "
                              "JSON için json_extract(meta, '$.submitted').",
                  params({"sql": {"type": "string"}}, ["sql"]), self._query_db),
         ]
@@ -306,6 +318,7 @@ class Toolbox:
             "bekleyen_bildirim": self.store.outbox_stats()["pending"],
             "kişisel_hatırlatma_sayısı": len(self.store.notes_pending()),
             "hafıza_not_sayısı": len(self.store.memory_list()),
+            "ders_programı": f"{len(self.store.lessons())} ders (ayrıntı: timetable)",
             "son_kontrol": json.loads(self.store.get("last_scan", "{}")),
         }
         state["sessizdeki_dersler"] = PR.muted_courses(self.store)
@@ -361,6 +374,13 @@ class Toolbox:
             if at and at <= end:
                 planned.append((at, {"tür": "kişisel hatırlatma", "başlık": note["text"], "id": note["id"],
                                      "kanal": CHANNEL_LABEL[note.get("channel", "telegram")]}))
+        if PR.load(self.store).get("lesson", True):
+            for d in TT.departures(self.store.lessons(), self._skips(now), now, self.s.tz, ahead=end - now):
+                if now < d.at:
+                    lesson = d.occurrence.lesson
+                    planned.append((d.at, {"tür": "derse çıkış bildirimi (Pushover)", "başlık": TT.label(lesson),
+                                           "ders_saati": fmt_dt(d.occurrence.start, self.s.tz, now),
+                                           "sınıf": TT.place(lesson), "ders_id": lesson["id"]}))
         planned.sort(key=lambda p: p[0])
         return [{"zaman": when(at, self.s.tz, now), **entry} for at, entry in planned[:60]]
 
@@ -374,6 +394,67 @@ class Toolbox:
             return {"hata": f"sorgu çalışmadı: {e}"}
         clip = lambda v: v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v  # noqa: E731
         return {"sütunlar": columns, "satırlar": [[clip(v) for v in row] for row in rows], "satır_sayısı": len(rows)}
+
+    # ── Ders programı ─────────────────────────────────────────────────────
+    def _skips(self, now: datetime) -> set[tuple[int, str]]:
+        return self.store.lesson_skips((now.astimezone(self.s.tz) - timedelta(days=1)).date().isoformat())
+
+    def _alert_text(self, lesson: dict) -> str:
+        if not PR.load(self.store).get("lesson", True):
+            return "kapalı (bütün derse çıkış bildirimleri /bildirimler'den kapatılmış)"
+        mode = {None: f"otomatik: öğleden sonra başlayan derse {LEAD_TEXT} önce, o gün zaten o kampüsteysen gelmez",
+                1: f"her zaman, {LEAD_TEXT} önce", 0: "bu ders için kapalı"}
+        return mode.get(lesson.get("alert"), mode[None])
+
+    def _lesson_entry(self, lesson: dict, now: datetime, skips: set) -> dict:
+        entry = {"id": lesson["id"], "gün": TT.WEEKDAYS[lesson["weekday"]],
+                 "saat": f"{lesson['start']}-{lesson['end']}", "ders": TT.label(lesson),
+                 "sınıf": lesson["room"] or "bilinmiyor"}
+        if lesson["campus"]:
+            entry["kampüs"] = lesson["campus"]
+        if lesson["teacher"]:
+            entry["öğretim_üyesi"] = lesson["teacher"]
+        entry["çıkış_bildirimi"] = self._alert_text(lesson)
+        nxt = TT.next_occurrence(lesson, now, self.s.tz)
+        if nxt is not None:
+            entry["sıradaki"] = fmt_dt(nxt.start, self.s.tz, now)
+            if (lesson["id"], nxt.date.isoformat()) in skips:
+                entry["bu_hafta"] = f"iptal ({nxt.date.isoformat()}), bildirim gitmeyecek"
+        return entry
+
+    def _timetable(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        lessons = self.store.lessons()
+        if args.get("day"):
+            day = TT.parse_weekday(args["day"])
+            lessons = [l for l in lessons if l["weekday"] == day]
+        skips = self._skips(now)
+        return {"bugün": fmt_dt(now, self.s.tz, now), "dersler": [self._lesson_entry(l, now, skips) for l in lessons]
+                or "programda ders yok"}
+
+    def _class_now(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        lessons = self.store.lessons()
+        if not lessons:
+            return {"durum": "ders programı boş; öğrenci add_lesson ile ders ekletebilir"}
+        current, following = TT.now_or_next(lessons, now, self.s.tz, self._skips(now))
+        out: dict = {"şimdi": fmt_dt(now, self.s.tz, now)}
+        out["şu_an_süren"] = TT.view(current, now, self.s.tz) if current else "şu an ders yok"
+        if following:
+            out["sıradaki"] = TT.view(following, now, self.s.tz)
+        return out
+
+    def _find_class(self, args: dict, turn: Turn) -> dict | list:
+        now = datetime.now(timezone.utc)
+        lessons = self.store.lessons()
+        found = TT.find(lessons, args.get("query", ""))
+        if not args.get("query"):
+            return {"durum": "hangi ders? query ver", "programdaki_dersler": [TT.label(l) for l in lessons]}
+        if not found:
+            return {"hata": "programda böyle bir ders yok",
+                    "programdaki_dersler": [TT.label(l) for l in lessons]}
+        skips = self._skips(now)
+        return [self._lesson_entry(l, now, skips) for l in found]
 
     def _local_time(self, value):
         dt = M.parse_dt(value) if isinstance(value, str) and value else None
@@ -539,12 +620,123 @@ class Toolbox:
             Tool("resend_notification", "Daha önce gönderilmiş bir bildirimi aynı haliyle tekrar gönderir; id "
                                         "recent_notifications'tan.",
                  params({"id": {"type": "integer"}}, ["id"]), self._resend_notification, writes=True),
+            *self._lesson_tools(),
+        ]
+
+    def _lesson_tools(self) -> list[Tool]:
+        """Ders programını değiştiren araçlar; hepsi önce JEV'e "öğrenci bunu istedi mi" diye sorulur."""
+        fields = {"code": {"type": "string", "description": "Ders kodu, ör. BIL463"},
+                  "name": {"type": "string"}, "weekday": {"type": "string", "description": "Pazartesi..Pazar"},
+                  "start": {"type": "string", "description": "SS:DD"}, "end": {"type": "string", "description": "SS:DD"},
+                  "room": {"type": "string", "description": "Sınıf, ör. B-111"},
+                  "campus": {"type": "string", "description": "Ana kampüs değilse kampüs adı, ör. Küçükyalı"},
+                  "teacher": {"type": "string"}}
+        lesson_id = {"id": {"type": "integer", "description": "Dersin id'si (timetable, class_now ya da find_class)"}}
+        day = {"type": "string", "description": "YYYY-MM-DD; verilmezse dersin bu haftaki (en yakın) günü"}
+        return [
+            Tool("add_lesson", "Ders programına yüz yüze ders ekler.",
+                 params(fields, ["code", "name", "weekday", "start", "end"]), self._add_lesson, writes=True,
+                 risky=always),
+            Tool("update_lesson", "Bir dersin sınıfını, saatini, gününü ya da diğer bilgilerini değiştirir "
+                                  "(\"kariyer planlamanın sınıfı D-204\"). Sadece değişen alanları ver.",
+                 params(lesson_id | fields, ["id"]), self._update_lesson, writes=True, risky=always),
+            Tool("delete_lesson", "Dersi programdan tamamen siler. Sadece öğrenci dersi bıraktığını ya da silinmesini "
+                                  "açıkça söylerse; tek bir haftanın iptali için skip_lesson kullan.",
+                 params(lesson_id, ["id"]), self._delete_lesson, writes=True, risky=always),
+            Tool("skip_lesson", "Öğrenci \"bu dersi iptal ettim\", \"bu hafta gitmiyorum\", \"ders iptal\" derse: sadece "
+                                "o günkü ders iptal sayılır ve derse çıkış bildirimi gitmez. Sonraki haftalar etkilenmez.",
+                 params(lesson_id | {"date": day}, ["id"]), self._skip_lesson, writes=True, risky=always),
+            Tool("unskip_lesson", "skip_lesson ile yapılan iptali geri alır.",
+                 params(lesson_id | {"date": day}, ["id"]), self._unskip_lesson, writes=True, risky=always),
+            Tool("set_lesson_alert", f"Bir dersin derse çıkış bildirimini ({LEAD_TEXT} önce Pushover) ayarlar. "
+                                     "auto: kural (öğleden sonraki derslere, o gün zaten kampüsteyse gelmez), on: her "
+                                     "zaman, off: bu ders için hiç.",
+                 params(lesson_id | {"mode": {"type": "string", "enum": ["auto", "on", "off"]}}, ["id", "mode"]),
+                 self._set_lesson_alert, writes=True, risky=always),
         ]
 
     def _need_engine(self):
         if self.engine is None:
             raise RuntimeError("bu işlem şu an yapılamıyor")
         return self.engine
+
+    def _lesson_or_error(self, args: dict) -> dict:
+        lesson = self.store.lesson_get(int(args.get("id") or 0))
+        if lesson is None:
+            raise ValueError("bu id'de ders yok; timetable ile bak")
+        return lesson
+
+    def _lesson_line(self, lesson: dict) -> str:
+        return f"{TT.WEEKDAYS[lesson['weekday']]} {lesson['start']}-{lesson['end']} {TT.label(lesson)} · {TT.place(lesson)}"
+
+    def _add_lesson(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        lesson_id, new = self.store.lesson_add(args, now)
+        lesson = self.store.lesson_get(lesson_id)
+        if new:
+            turn.actions.append(f"Ders eklendi: {self._lesson_line(lesson)}")
+        return {"durum": "eklendi" if new else "zaten programda", "ders": self._lesson_entry(lesson, now, set())}
+
+    def _update_lesson(self, args: dict, turn: Turn) -> dict:
+        before = self._lesson_or_error(args)
+        changes = {k: v for k, v in args.items() if k in TT.FIELDS and v not in (None, "")}
+        if not changes:
+            return {"hata": "değişecek alan verilmedi"}
+        lesson = self.store.lesson_update(before["id"], changes)
+        turn.actions.append(f"Ders güncellendi: {self._lesson_line(lesson)}")
+        return {"durum": "tamam", "ders": self._lesson_entry(lesson, datetime.now(timezone.utc), set())}
+
+    def _delete_lesson(self, args: dict, turn: Turn) -> dict:
+        lesson = self.store.lesson_delete(self._lesson_or_error(args)["id"])
+        turn.actions.append(f"Ders programdan silindi: {self._lesson_line(lesson)}")
+        return {"durum": "silindi", "ders": TT.label(lesson)}
+
+    def _lesson_day(self, lesson: dict, args: dict, now: datetime) -> datetime:
+        """skip/unskip için dersin o günkü başlangıcı: tarih verilmezse bu haftaki (bitmemiş en yakın) ders."""
+        if not args.get("date"):
+            occ = TT.next_occurrence(lesson, now, self.s.tz)
+            return occ.start
+        try:
+            day = datetime.strptime(str(args["date"]).strip()[:10], "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("tarih YYYY-MM-DD biçiminde olmalı") from None
+        if day.weekday() != lesson["weekday"]:
+            raise ValueError(f"{day.isoformat()} bir {TT.WEEKDAYS[day.weekday()]}; bu ders "
+                             f"{TT.WEEKDAYS[lesson['weekday']]} günleri")
+        h, m = map(int, lesson["start"].split(":"))
+        return datetime.combine(day, dtime(h, m), tzinfo=self.s.tz)
+
+    def _skip_lesson(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        lesson = self._lesson_or_error(args)
+        start = self._lesson_day(lesson, args, now)
+        if start.date() < now.astimezone(self.s.tz).date():
+            return {"hata": "geçmiş bir dersi iptal edemezsin"}
+        self.store.lesson_skip(lesson["id"], start.date().isoformat())
+        turn.actions.append(f"Ders iptal edildi, bildirimi gelmeyecek: {fmt_dt(start, self.s.tz, now)} "
+                            f"{TT.label(lesson)}")
+        return {"durum": "tamam", "iptal_edilen": f"{fmt_dt(start, self.s.tz, now)} {TT.label(lesson)}",
+                "not": "sadece bu tarih; sonraki haftalar normal"}
+
+    def _unskip_lesson(self, args: dict, turn: Turn) -> dict:
+        now = datetime.now(timezone.utc)
+        lesson = self._lesson_or_error(args)
+        start = self._lesson_day(lesson, args, now)
+        if (lesson["id"], start.date().isoformat()) not in self._skips(now):
+            return {"hata": "bu tarihte iptal edilmiş bir ders yok"}
+        self.store.lesson_skip(lesson["id"], start.date().isoformat(), skip=False)
+        turn.actions.append(f"Ders iptali geri alındı: {fmt_dt(start, self.s.tz, now)} {TT.label(lesson)}")
+        return {"durum": "tamam"}
+
+    def _set_lesson_alert(self, args: dict, turn: Turn) -> dict:
+        lesson = self._lesson_or_error(args)
+        mode = args.get("mode")
+        if mode not in ("auto", "on", "off"):
+            return {"hata": "mode auto, on ya da off olmalı"}
+        lesson = self.store.lesson_update(lesson["id"], {"alert": {"auto": None, "on": True, "off": False}[mode]})
+        text = self._alert_text(lesson)
+        turn.actions.append(f"Derse çıkış bildirimi ({TT.label(lesson)}): {text}")
+        return {"durum": "tamam", "çıkış_bildirimi": text}
 
     def _set_quiet(self, args: dict, turn: Turn) -> dict:
         engine = self._need_engine()
