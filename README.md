@@ -185,9 +185,9 @@ Reminder planner her dakika çalışır ve bildirimi önceden, gönderim zamanı
 |---|---|---|
 | Çağıran (backend) | `router.py` FindingRouter | `guard.py` ActionGuard |
 | Ne zaman | Her yeni ya da değişen finding | Riskli bir action tool çalışmadan hemen önce |
-| JEV'e giden state | Finding metni ve backend'in hesapladığı gerçekler (kalan saat, teslim durumu, tarih öne mi alındı) | Öğrencinin mesajı, son birkaç mesaj, önerilen tool ve argümanları |
+| JEV'e giden state | Finding metni ve backend'in hesapladığı gerçekler (kalan saat, teslim durumu, tarih öne mi alındı) | Öğrencinin mesajı, önerilen tool, argümanları ve hedefi (ör. id'nin hangi ders ve tarih olduğu); son birkaç mesaj sadece onaylar için |
 | Sorular (noul) | `requires_submission`, `exam_related`, `schedule_change`, `action_required`, `needs_explanation`, `push_now` | `explicitly_requested`, `risky` |
-| Kararı veren | Backend: `push_now` ≥ 0.80 alert, 0.30-0.80 LLM, ≤ 0.30 yok; `needs_explanation` ≥ 0.60 explain | Backend: `explicitly_requested` ≥ 0.60 allow; değilse `risky` < 0.25 allow, aksi halde deny |
+| Kararı veren | Backend: `push_now` ≥ 0.80 alert, 0.30-0.80 LLM, ≤ 0.30 yok; `needs_explanation` ≥ 0.60 explain | Backend: `explicitly_requested` ≥ 0.60 allow; değilse `risky` < 0.25 allow, aksi halde deny. Ders programı tool'larında risk istisnası yok: sadece `explicitly_requested` ≥ 0.50 allow |
 | JEV kapalıysa | Finding'ler doğrudan LLM'e gider | Guardrail atlanır, action yapılır |
 | LLM kapalıysa | Kararsız finding'ler kaçmasın diye alert olur | Sohbet agent'ı da kapalıdır |
 

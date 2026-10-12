@@ -62,6 +62,9 @@ def test_find_class_and_timetable(box):
     assert result[0]["sınıf"] == "A-127" and result[0]["gün"] == "Çarşamba"
     week, _ = call(box, "timetable")
     assert len(week["dersler"]) == 6
+    alerts = {d["ders"].split()[0]: d["sıradaki_çıkış_bildirimi"] for d in week["dersler"]}
+    assert alerts["GNL390"] == "bugün 15:45" and alerts["KRP"].startswith("15 Eki") and alerts["KRP"].endswith("15:25")
+    assert alerts["BIL469"].startswith("bu hafta gelmeyecek") and alerts["BIL453"].startswith("bu hafta gelmeyecek")
     thursday, _ = call(box, "timetable", {"day": "perşembe"})
     assert [d["saat"] for d in thursday["dersler"]] == ["16:40-17:30", "18:00-19:50"]
     missing, _ = call(box, "find_class", {"query": "ENG405"})
@@ -111,11 +114,23 @@ def test_lesson_changes_go_through_jev(box):
     result, turn = call(strict, "skip_lesson", {"id": lesson_id(box, "BIL463")}, "bulanık mantık hangi sınıfta?")
     assert result["hata"] == "güvenlik kontrolü bu eylemi durdurdu"
     assert box.store.lesson_skips("2026-10-01") == set()
-    assert jev.states[0][0]["proposed_action"]["tool"] == "skip_lesson"
+    action = jev.states[0][0]["proposed_action"]
+    assert action["tool"] == "skip_lesson"
+    # JEV id'yi öğrencinin sözüyle eşleştirebilsin: dersin adı, o günkü tarih ve bugünün tarihi
+    assert "BIL463 Bulanık Mantık" in action["target"] and "2026-10-13 13:00 (bugün 13:00)" in action["target"]
+    assert "bugün Salı 2026-10-13" in action["target"]
 
-    ok = guarded(box, FakeJev(requested=0.95, risky=0.5))
+    ok = guarded(box, FakeJev(requested=0.55, risky=0.5))
     result, _ = call(ok, "skip_lesson", {"id": lesson_id(box, "BIL463")}, "bulanık mantığı iptal ettim")
     assert result["durum"] == "tamam"
+
+
+def test_low_risk_does_not_excuse_unrequested_lesson_change(box):
+    # Gerçek JEV: "şu anki ders hangi sınıftaydı?" sorusunda sınıf değişikliğine istendi %8, riskli %11 verdi
+    strict = guarded(box, FakeJev(requested=0.08, risky=0.11))
+    krp = lesson_id(box, "KRP")
+    result, _ = call(strict, "update_lesson", {"id": krp, "room": "D-204"}, "şu anki ders hangi sınıftaydı?")
+    assert result["hata"] == "güvenlik kontrolü bu eylemi durdurdu" and box.store.lesson_get(krp)["room"] == ""
 
 
 def test_read_tools_skip_jev(box):

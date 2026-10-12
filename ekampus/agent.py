@@ -16,7 +16,7 @@ import inspect
 import json
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from typing import Any, Callable, Protocol
@@ -100,6 +100,8 @@ class Tool:
     writes: bool = False      # botun durumunu değiştirir ya da sohbete bir şey gönderir
     chat_only: bool = False   # durum değiştirmez ama siteye gider (yavaş); bulgu değerlendirmesinde yok
     risky: Callable[[dict], bool] | None = None  # bu argümanlarla riskliyse önce JEV'e sorulur (guard.py)
+    target: Callable[[dict], str] | None = None  # argümanların neye karşılık geldiği, JEV'e giden state için
+    strict: bool = False      # kayıt değiştirir: risk düşük olsa da sadece öğrenci istediyse yapılır (guard.py)
 
     @property
     def needs_chat(self) -> bool:
@@ -406,7 +408,17 @@ class Toolbox:
                 1: f"her zaman, {LEAD_TEXT} önce", 0: "bu ders için kapalı"}
         return mode.get(lesson.get("alert"), mode[None])
 
-    def _lesson_entry(self, lesson: dict, now: datetime, skips: set) -> dict:
+    def _next_departures(self, now: datetime, skips: set) -> dict[int, datetime]:
+        """Her ders için önümüzdeki 8 gündeki ilk çıkış bildiriminin zamanı (kod hesaplar, model değil)."""
+        if not PR.load(self.store).get("lesson", True):
+            return {}
+        found: dict[int, datetime] = {}
+        for d in TT.departures(self.store.lessons(), skips, now, self.s.tz, ahead=timedelta(days=8)):
+            found.setdefault(d.occurrence.lesson["id"], d.at)
+        return found
+
+    def _lesson_entry(self, lesson: dict, now: datetime, skips: set,
+                      departures: dict[int, datetime] | None = None) -> dict:
         entry = {"id": lesson["id"], "gün": TT.WEEKDAYS[lesson["weekday"]],
                  "saat": f"{lesson['start']}-{lesson['end']}", "ders": TT.label(lesson),
                  "sınıf": lesson["room"] or "bilinmiyor"}
@@ -420,6 +432,10 @@ class Toolbox:
             entry["sıradaki"] = fmt_dt(nxt.start, self.s.tz, now)
             if (lesson["id"], nxt.date.isoformat()) in skips:
                 entry["bu_hafta"] = f"iptal ({nxt.date.isoformat()}), bildirim gitmeyecek"
+        if departures is not None:
+            at = departures.get(lesson["id"])
+            entry["sıradaki_çıkış_bildirimi"] = (fmt_dt(at, self.s.tz, now) if at else
+                                                 "bu hafta gelmeyecek (sabah dersi, zaten kampüstesin ya da kapalı)")
         return entry
 
     def _timetable(self, args: dict, turn: Turn) -> dict:
@@ -429,8 +445,9 @@ class Toolbox:
             day = TT.parse_weekday(args["day"])
             lessons = [l for l in lessons if l["weekday"] == day]
         skips = self._skips(now)
-        return {"bugün": fmt_dt(now, self.s.tz, now), "dersler": [self._lesson_entry(l, now, skips) for l in lessons]
-                or "programda ders yok"}
+        departures = self._next_departures(now, skips)
+        return {"bugün": fmt_dt(now, self.s.tz, now),
+                "dersler": [self._lesson_entry(l, now, skips, departures) for l in lessons] or "programda ders yok"}
 
     def _class_now(self, args: dict, turn: Turn) -> dict:
         now = datetime.now(timezone.utc)
@@ -454,7 +471,8 @@ class Toolbox:
             return {"hata": "programda böyle bir ders yok",
                     "programdaki_dersler": [TT.label(l) for l in lessons]}
         skips = self._skips(now)
-        return [self._lesson_entry(l, now, skips) for l in found]
+        departures = self._next_departures(now, skips)
+        return [self._lesson_entry(l, now, skips, departures) for l in found]
 
     def _local_time(self, value):
         dt = M.parse_dt(value) if isinstance(value, str) and value else None
@@ -624,7 +642,8 @@ class Toolbox:
         ]
 
     def _lesson_tools(self) -> list[Tool]:
-        """Ders programını değiştiren araçlar; hepsi önce JEV'e "öğrenci bunu istedi mi" diye sorulur."""
+        """Ders programını değiştiren araçlar; hepsi önce JEV'e "öğrenci bunu istedi mi" diye sorulur (strict: düşük
+        risk istisnası yok)."""
         fields = {"code": {"type": "string", "description": "Ders kodu, ör. BIL463"},
                   "name": {"type": "string"}, "weekday": {"type": "string", "description": "Pazartesi..Pazar"},
                   "start": {"type": "string", "description": "SS:DD"}, "end": {"type": "string", "description": "SS:DD"},
@@ -633,32 +652,49 @@ class Toolbox:
                   "teacher": {"type": "string"}}
         lesson_id = {"id": {"type": "integer", "description": "Dersin id'si (timetable, class_now ya da find_class)"}}
         day = {"type": "string", "description": "YYYY-MM-DD; verilmezse dersin bu haftaki (en yakın) günü"}
-        return [
+        return [replace(tool, strict=True) for tool in [
             Tool("add_lesson", "Ders programına yüz yüze ders ekler.",
                  params(fields, ["code", "name", "weekday", "start", "end"]), self._add_lesson, writes=True,
                  risky=always),
             Tool("update_lesson", "Bir dersin sınıfını, saatini, gününü ya da diğer bilgilerini değiştirir "
                                   "(\"kariyer planlamanın sınıfı D-204\"). Sadece değişen alanları ver.",
-                 params(lesson_id | fields, ["id"]), self._update_lesson, writes=True, risky=always),
+                 params(lesson_id | fields, ["id"]), self._update_lesson, writes=True, risky=always,
+                 target=self._lesson_target),
             Tool("delete_lesson", "Dersi programdan tamamen siler. Sadece öğrenci dersi bıraktığını ya da silinmesini "
                                   "açıkça söylerse; tek bir haftanın iptali için skip_lesson kullan.",
-                 params(lesson_id, ["id"]), self._delete_lesson, writes=True, risky=always),
+                 params(lesson_id, ["id"]), self._delete_lesson, writes=True, risky=always,
+                 target=self._lesson_target),
             Tool("skip_lesson", "Öğrenci \"bu dersi iptal ettim\", \"bu hafta gitmiyorum\", \"ders iptal\" derse: sadece "
                                 "o günkü ders iptal sayılır ve derse çıkış bildirimi gitmez. Sonraki haftalar etkilenmez.",
-                 params(lesson_id | {"date": day}, ["id"]), self._skip_lesson, writes=True, risky=always),
+                 params(lesson_id | {"date": day}, ["id"]), self._skip_lesson, writes=True, risky=always,
+                 target=self._lesson_day_target),
             Tool("unskip_lesson", "skip_lesson ile yapılan iptali geri alır.",
-                 params(lesson_id | {"date": day}, ["id"]), self._unskip_lesson, writes=True, risky=always),
+                 params(lesson_id | {"date": day}, ["id"]), self._unskip_lesson, writes=True, risky=always,
+                 target=self._lesson_day_target),
             Tool("set_lesson_alert", f"Bir dersin derse çıkış bildirimini ({LEAD_TEXT} önce Pushover) ayarlar. "
                                      "auto: kural (öğleden sonraki derslere, o gün zaten kampüsteyse gelmez), on: her "
                                      "zaman, off: bu ders için hiç.",
                  params(lesson_id | {"mode": {"type": "string", "enum": ["auto", "on", "off"]}}, ["id", "mode"]),
-                 self._set_lesson_alert, writes=True, risky=always),
-        ]
+                 self._set_lesson_alert, writes=True, risky=always, target=self._lesson_target),
+        ]]
 
     def _need_engine(self):
         if self.engine is None:
             raise RuntimeError("bu işlem şu an yapılamıyor")
         return self.engine
+
+    def _lesson_target(self, args: dict) -> str:
+        """JEV için: id'nin hangi ders olduğu."""
+        return self._lesson_line(self._lesson_or_error(args))
+
+    def _lesson_day_target(self, args: dict) -> str:
+        """JEV için: iptal edilecek (ya da iptali geri alınacak) dersin kendisi ve tarihi."""
+        now = datetime.now(timezone.utc)
+        lesson = self._lesson_or_error(args)
+        start = self._lesson_day(lesson, args, now)
+        return (f"{self._lesson_line(lesson)}; o günkü ders: {TT.WEEKDAYS[start.weekday()]} {start:%Y-%m-%d %H:%M} "
+                f"({fmt_dt(start, self.s.tz, now)}); bugün {TT.WEEKDAYS[now.astimezone(self.s.tz).weekday()]} "
+                f"{now.astimezone(self.s.tz):%Y-%m-%d}")
 
     def _lesson_or_error(self, args: dict) -> dict:
         lesson = self.store.lesson_get(int(args.get("id") or 0))

@@ -196,6 +196,7 @@ class Assistant:
     async def _rounds(self, model: str, messages: list[dict], tools: list[dict] | None, max_tokens: int,
                       trace: dict, turn: Turn) -> str:
         trace["tools"] = [t["function"]["name"] for t in tools or []]
+        nudged = False
         for _ in range(MAX_TOOL_ROUNDS):
             response = await self.client.chat.completions.create(
                 model=model, messages=messages, max_tokens=max_tokens, temperature=0.3,
@@ -204,7 +205,14 @@ class Assistant:
             trace["tokens"] += self._spend(response.usage)
             choice = response.choices[0].message
             if not choice.tool_calls:
-                return (choice.content or "").strip()
+                trace["finish_reason"] = getattr(response.choices[0], "finish_reason", None)
+                text = (choice.content or "").strip()
+                if text or nudged or not trace["steps"]:
+                    return text
+                # Gerçek modelde bir kez görüldü: tool sonucundan sonra boş cevap. Bir kez cevap yazmasını iste.
+                nudged = True
+                messages.append({"role": "user", "content": "Araç sonuçlarına göre soruma şimdi cevap yaz."})
+                continue
             messages.append({"role": "assistant", "content": choice.content or "",
                              "tool_calls": [tc.model_dump() for tc in choice.tool_calls]})
             for call in choice.tool_calls:

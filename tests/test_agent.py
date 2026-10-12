@@ -251,6 +251,14 @@ def test_chat_without_actions_has_no_footer(box, settings):
     assert reply.text == "Her şey açık." and reply.actions == [] and not reply.flush
 
 
+def test_empty_answer_after_tools_is_asked_once_more(box, settings):
+    a = agent(box, settings)
+    a.client, sent = scripted(_response(tool_calls=[_Call("c1", "bot_state", {})]), _response(content=""),
+                              _response(content="Her şey açık."))
+    reply = asyncio.run(a.chat("durum ne?"))
+    assert reply.text == "Her şey açık." and sent[2]["messages"][-1]["content"].startswith("Araç sonuçlarına göre")
+
+
 def test_model_written_action_list_is_replaced_by_code(box, settings):
     a = agent(box, settings)
     a.client, _ = scripted(

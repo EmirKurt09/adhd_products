@@ -44,6 +44,12 @@ def test_decision(requested, risky, allowed):
     assert decide(JevDecision({"explicitly_requested": requested, "risky": risky})).allowed is allowed
 
 
+@pytest.mark.parametrize("requested,risky,allowed", [(0.55, 0.9, True), (0.44, 0.05, False), (0.5, 0.3, True)])
+def test_strict_decision_ignores_low_risk(requested, risky, allowed):
+    decision = JevDecision({"explicitly_requested": requested, "risky": risky})
+    assert decide(decision, strict=True).allowed is allowed
+
+
 def test_requested_risky_action_goes_through(settings):
     jev = FakeJev(requested=0.95, risky=0.9)
     box = make(settings, jev)
@@ -72,7 +78,7 @@ def test_confirmation_of_a_proposal_carries_context(settings):
     box.store.db.execute("INSERT INTO items (kind, uid, scope, title, course, fingerprint, first_seen, last_seen, "
                          "updated_at) VALUES ('file', '1', 'c', 't', 'Ağlar', 'f', 'x', 'x', 'x')")
     result, _ = call(box, "mute_course", {"course": "Ağlar", "muted": True}, "evet", context)
-    assert result["durum"] == "tamam" and jev.states[0][0]["conversation"] == context
+    assert result["durum"] == "tamam" and jev.states[0][0]["earlier_messages"] == context
 
 
 def test_safe_directions_and_tools_skip_jev(settings):
