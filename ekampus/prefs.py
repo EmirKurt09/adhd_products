@@ -14,6 +14,7 @@ CATEGORIES: list[tuple[str, str]] = [
     ("announcements", "Duyurular"),
     ("files", "Materyaller"),
     ("calendar", "Canlı ders / etkinlik"),
+    ("lesson", "Derse çıkış"),
     ("digest", "Sabah özeti"),
     ("assistant", "Asistan uyarıları"),
     ("system", "Sistem uyarıları"),
@@ -113,6 +114,8 @@ def category_of(event_type: str, payload: dict) -> str | None:
         return "reminders"
     if event_type == "live_soon":
         return "calendar"
+    if event_type == "depart":
+        return "lesson"
     kind = payload.get("kind", "")
     if event_type in ("changed", "due_changed") and kind == "assignment":
         return "changes"

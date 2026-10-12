@@ -26,6 +26,7 @@ from playwright.async_api import Error as PlaywrightError
 from . import features
 from . import parse as P
 from . import prefs as PR
+from . import timetable as TT
 from .browser import AuthBlocked, AuthError, AuthGuard, Campus, CaptchaRequired, LoginCooldown, LoginRejected
 from .config import Settings
 from .detect import diff
@@ -356,6 +357,18 @@ class Engine:
         planned = plan_reminders(items, self.s.reminder_hours, self.s.live_lesson_reminder_min, now)
         return self.store.enqueue_planned(planned, now)
 
+    def plan_departures(self, now: datetime) -> int:
+        """Ders programından "derse çıkma vakti" bildirimleri (Pushover); her dakika çağrılır, anahtar tekrar kurmaz."""
+        since = (now.astimezone(self.s.tz) - timedelta(days=1)).date().isoformat()
+        added = 0
+        for d in TT.departures(self.store.lessons(), self.store.lesson_skips(since), now, self.s.tz):
+            o = d.occurrence
+            payload = {"lesson_id": o.lesson["id"], "label": TT.label(o.lesson), "room": o.lesson["room"],
+                       "campus": o.lesson["campus"], "start": o.start.isoformat(), "end": o.end.isoformat(),
+                       "priority": 1}
+            added += self.store.enqueue(Event("depart", d.key, payload), now, not_before=d.at)
+        return added
+
     # ── Outbox gönderimi ──────────────────────────────────────────────────
     def hold_reason(self, now: datetime) -> str | None:
         muted = self.muted_until()
@@ -369,7 +382,8 @@ class Engine:
     def is_urgent(row) -> bool:
         if row["type"] == "alert":
             return json.loads(row["payload"]).get("urgent", True)
-        if row["type"] in ("live_soon", "baseline", "note"):  # note: kullanıcının saatini kendi seçtiği hatırlatma
+        # note: kullanıcının saatini kendi seçtiği hatırlatma; depart: derse çıkma vakti (beklerse anlamı kalmaz)
+        if row["type"] in ("live_soon", "baseline", "note", "depart"):
             return True
         if row["type"] == "reminder":
             return json.loads(row["payload"]).get("hours", 99) <= 3
@@ -427,9 +441,9 @@ class Engine:
         return sent
 
     def _sender_for(self, event_type: str, payload: dict, telegram: Sender) -> Sender:
-        """alert ve "Pushover'dan hatırlat" denmiş kişisel hatırlatmalar Pushover'a; "both" ise ikisine."""
+        """alert, derse çıkış ve "Pushover'dan hatırlat" denmiş kişisel hatırlatmalar Pushover'a; "both" ise ikisine."""
         channel = payload.get("channel", "telegram") if event_type == "note" else None
-        if event_type == "alert" or channel == "pushover":
+        if event_type in ("alert", "depart") or channel == "pushover":
             return self._alert_sender(telegram)
         if channel == "both":
             async def both(message: Message, context: dict) -> None:

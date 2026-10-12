@@ -1,11 +1,15 @@
 """Ders programı: saat hesapları, "şu anki ders", derse çıkış planı ve store kayıtları."""
 
+import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from ekampus import prefs as PR
 from ekampus import timetable as TT
+from ekampus.engine import Engine
 from ekampus.models import Event
 from ekampus.store import Store
 
@@ -151,6 +155,64 @@ def test_update_and_skip_drop_pending_departure():
     assert store.outbox_by_key(key) is None
     store.lesson_skip(lesson["id"], "2026-10-13", skip=False)
     assert store.lesson_skips("2026-10-01") == set()
+
+
+# ── Engine: Pushover'a giden "derse çıkma vakti" ─────────────────────────
+def engine_with_schedule(settings, pushed=None):
+    channel = None
+    if pushed is not None:
+        settings = replace(settings, pushover_app_token="APPTOKEN", pushover_user_key="USERKEY")
+
+        async def channel(text, priority):
+            pushed.append((text, priority))
+    engine = Engine(settings, store_with_schedule(), alert_channel=channel)
+    return engine
+
+
+def flush(engine, now) -> list[str]:
+    telegram: list[str] = []
+
+    async def send(message, ctx):
+        telegram.append(message.text)
+
+    asyncio.run(engine.flush(send, now.astimezone(timezone.utc)))
+    return telegram
+
+
+def test_departure_goes_to_pushover_at_time(settings):
+    pushed: list = []
+    engine = engine_with_schedule(settings, pushed)
+    morning = at(0, "08:00").astimezone(timezone.utc)
+    assert engine.plan_departures(morning) == 2
+    assert engine.plan_departures(morning) == 0  # her dakika çağrılır, tekrar kurmaz
+    assert flush(engine, at(0, "11:40")) == [] and pushed == []
+    assert flush(engine, at(0, "11:45")) == []
+    text, priority = pushed[0]
+    assert priority == 1 and "Derse çıkma vakti: BIL463 Bulanık Mantık" in text
+    assert "Başlangıç 13:00 (1 sa 15 dk kaldı) · B-111" in text
+
+
+def test_departure_without_pushover_goes_to_telegram(settings):
+    engine = engine_with_schedule(settings)
+    engine.plan_departures(at(0, "08:00").astimezone(timezone.utc))
+    sent = flush(engine, at(0, "15:45"))
+    assert len(sent) == 2 and "C-307 (Küçükyalı)" in sent[1]  # 11:45'teki geç de olsa gider
+
+
+def test_departure_category_can_be_turned_off(settings):
+    engine = engine_with_schedule(settings)
+    PR.set_value(engine.store, "lesson", False)
+    engine.plan_departures(at(0, "08:00").astimezone(timezone.utc))
+    assert flush(engine, at(0, "12:00")) == []
+
+
+def test_departure_held_in_full_quiet_but_not_normal_quiet(settings):
+    engine = engine_with_schedule(settings)
+    engine.plan_departures(at(0, "08:00").astimezone(timezone.utc))
+    engine.set_mute(at(0, "20:00").astimezone(timezone.utc))
+    assert len(flush(engine, at(0, "11:45"))) == 1
+    engine.set_mute(at(0, "20:00").astimezone(timezone.utc), allow_urgent=False)
+    assert flush(engine, at(0, "15:45")) == []
 
 
 def test_delete_removes_skips():

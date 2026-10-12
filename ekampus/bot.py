@@ -789,7 +789,8 @@ async def _tldr(context, c: Ctx, data: dict, reply_to: int) -> None:
 
 
 async def reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if deps(context).engine.plan_reminders(now_utc()):
+    engine, now = deps(context).engine, now_utc()
+    if engine.plan_reminders(now) + engine.plan_departures(now):
         await flush_job(context)
 
 

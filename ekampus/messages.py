@@ -212,6 +212,14 @@ def render_event(event_type: str, data: dict, tz: ZoneInfo, now: datetime) -> Me
     if event_type == "note":
         return Message(f"<b>Hatırlatma:</b> {escape(clip(data.get('text', ''), 1000))}")
 
+    if event_type == "depart":
+        start = datetime.fromisoformat(data["start"])
+        place = data.get("room") or "sınıf bilinmiyor"
+        if data.get("campus"):
+            place += f" ({data['campus']})"
+        return Message(f"<b>Derse çıkma vakti: {escape(data.get('label', 'ders'))}</b>\n"
+                       f"Başlangıç {start.astimezone(tz).strftime('%H:%M')} ({remaining(start, now)}) · {escape(place)}")
+
     if event_type == "explain":
         return Message(f"<b>Kısaca:</b> {title}{_course(data)}\n{escape(clip(data.get('text', ''), 1500))}", silent=True)
 
@@ -393,7 +401,7 @@ def digest_view(rows: list[dict], fresh: dict[str, list], tz: ZoneInfo, now: dat
 
 HISTORY_LABEL = {"due_changed": "Tarih değişti", "changed": "Güncellendi", "reminder": "Hatırlatma",
                  "live_soon": "Canlı ders", "scope_added": "İzlemeye alındı", "alert": "Sistem",
-                 "note": "Hatırlatman", "explain": "Açıklama"}
+                 "note": "Hatırlatman", "explain": "Açıklama", "depart": "Derse çıkış"}
 
 
 def ago(dt: datetime | None, now: datetime) -> str:
@@ -500,7 +508,7 @@ def notes_view(notes: list[dict], tz: ZoneInfo, now: datetime) -> Message:
 def history_entry(row) -> tuple[str, str]:
     """Gönderilmiş bir bildirimin türü ve başlığı (düz metin)."""
     payload = json.loads(row["payload"])
-    title = payload.get("title") or re.sub(r"<[^>]+>", "", payload.get("text", "")).split("\n")[0]
+    title = payload.get("title") or payload.get("label") or re.sub(r"<[^>]+>", "", payload.get("text", "")).split("\n")[0]
     if row["type"] == "baseline":
         return "İzleme başladı", ""
     if row["type"] == "new":
